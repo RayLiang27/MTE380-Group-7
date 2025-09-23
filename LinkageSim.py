@@ -46,7 +46,7 @@ def beam_points(fulcrum, l, alpha_deg, tie_offset=None):
         tie = fulcrum + float(tie_offset) * u
     return left, right, tie
 
-# -- NEW: sweep alpha and record required servo angle theta1 (deg)
+# Sweep alpha and record required servo angle theta1 (deg)
 def sweep_theta1_for_alpha(w, h, l1, l2, l, alpha_max=10.0, alpha_min=-10.0,
                            n=81, elbow_up=True, tie_offset=None, plot=True):
     fulcrum = np.array([0.0, float(h)])
@@ -105,8 +105,29 @@ def sweep_theta1_for_alpha(w, h, l1, l2, l, alpha_max=10.0, alpha_min=-10.0,
 
     return alphas, thetas, gain
 
+def linearity_r2_alpha_vs_theta(alphas, thetas):
+    """
+    Returns R^2 of a simple linear fit α = a*θ + b over all reachable samples.
+    If insufficient data, returns None.
+    """
+    valid = np.isfinite(alphas) & np.isfinite(thetas)
+    if valid.sum() < 5:
+        return None
+    th = np.asarray(thetas[valid], float)
+    al = np.asarray(alphas[valid], float)
+
+    # If θ has no spread, R^2 is undefined
+    if (th.max() - th.min()) < 1e-9:
+        return None
+
+    a, b = np.polyfit(th, al, 1)
+    al_fit = a * th + b
+    ss_res = np.sum((al - al_fit) ** 2)
+    ss_tot = np.sum((al - al.mean()) ** 2)
+    return None if ss_tot <= 0 else float(1.0 - ss_res / ss_tot)
+
 def plot_beam_balancer(w, h, l1, l2, l, elbow_up=True, theta=None):
-    # θ (beam angle) may be provided; otherwise leave default
+    
     theta = 0.0 if theta is None else np.radians(theta)
 
     fulcrum = np.array([0.0, float(h)])
@@ -116,7 +137,7 @@ def plot_beam_balancer(w, h, l1, l2, l, elbow_up=True, theta=None):
     beam_left  = fulcrum + l * np.array([np.cos(theta + np.pi), np.sin(theta + np.pi)])
     beam_right = fulcrum + l * np.array([np.cos(theta),         np.sin(theta)])
 
-    # IK: place joint2 exactly at beam_right
+    # Place joint2 exactly at beam_right
     sol = solve_two_link(motor, beam_right, l1, l2, elbow_up=elbow_up)
     if sol is None:
         # Unreachable – draw what we can and warn
@@ -209,7 +230,7 @@ def animate_mechanism(w, h, l1, l2, l,
             left, right, tie = beam_points(fulcrum, l, a, tie_offset)
             xs += [left[0], right[0], motor[0], fulcrum[0], tie[0]]
             ys += [left[1], right[1], motor[1], fulcrum[1], tie[1]]
-        pad = 0.15 * max(1.0, (max(xs) - min(xs)))
+        pad = 1.0 * max(1.0, (max(xs) - min(xs)))
         ax.set_xlim(min(xs)-pad, max(xs)+pad)
         ax.set_ylim(min(ys)-pad, max(ys)+pad)
 
@@ -269,10 +290,10 @@ def animate_mechanism(w, h, l1, l2, l,
     return ani
 
 
-def evaluate_combo(w, h, l, l1, l2, tie_offset=None, elbow_up=True):
+def evaluate_combo(w, h, l, l1, l2, tie_offset=None, elbow_up=True, alpha_max=10.0):
     alphas, thetas, gain0 = sweep_theta1_for_alpha(
         w, h, l1, l2, l,
-        alpha_max=5.0, alpha_min=-5.0, n=101,
+        alpha_max=alpha_max, alpha_min=-alpha_max, n=101,
         elbow_up=elbow_up, tie_offset=tie_offset, plot=False
     )
     valid = np.isfinite(thetas)
@@ -289,17 +310,23 @@ def evaluate_combo(w, h, l, l1, l2, tie_offset=None, elbow_up=True):
     # Servo span required for α±10°
     theta_span = float(np.nanmax(th) - np.nanmin(th)) if th.size else np.inf
 
-    # Precision near center (smaller |dα/dθ1| is finer control; 0.08–0.15 good)
-    precision = gain0  # deg/deg at α≈0 (may be None)
-    target = 0.12
-    prec_score = 0.0 if precision is None else np.exp(-((precision - target)**2) / (2*(0.04**2)))
+    # Precision near center (smaller |dα/dθ1| is finer control; 0.2 is good)
+    precision = (2*alpha_max) / theta_span if theta_span != 0 else 0.0 # deg/deg at α≈0 (may be None)
 
-    # Build a simple score (tweak weights to taste)
+    target_ratio = 0.20
+    ratio_tol    = 0.05   # how tightly you want to hug the target
+
+    ratio_term = 1.0 - ((precision - target_ratio) / ratio_tol) ** 2
+    ratio_term = float(np.clip(ratio_term, -1.0, 1.0))
+
+    r2_lin = linearity_r2_alpha_vs_theta(alphas, thetas)
+    # Score Design
     score = (
-        3.0 * coverage                           # must reach most of ±10°
-        - 1.5 * rev                               # penalize reversals
-        + 1.2 * prec_score                        # prefer target precision
-        # + 0.6 * np.tanh((30.0 - theta_span) / 10) # avoid huge servo span
+        3.0 * coverage                           
+        - 1.5 * rev                               
+        + 2.5 * ratio_term 
+        + (1.5 * (r2_lin if r2_lin is not None else 0.0))
+
     )
     return {
         "score": float(score),
@@ -307,6 +334,7 @@ def evaluate_combo(w, h, l, l1, l2, tie_offset=None, elbow_up=True):
         "reversals": int(rev),
         "theta_span_deg": float(theta_span),
         "gain_center_deg_per_deg": float(precision) if precision is not None else None,
+        "linearity_r2": r2_lin,
         "elbow_up": bool(elbow_up),
         "tie_offset": None if tie_offset is None else float(tie_offset),
         "L1": float(l1), "L2": float(l2),
@@ -315,15 +343,15 @@ def evaluate_combo(w, h, l, l1, l2, tie_offset=None, elbow_up=True):
 def search_lengths(w, h, l, 
                    L1_vals=np.linspace(20, 120, 11),
                    L2_vals=np.linspace(20, 120, 11),
-                   tie_offsets=(None,),             # or e.g., (None, 50) in mm from fulcrum
+                   tie_offsets=(None,),             
                    elbows=(True, False),
-                   top_k=10):
+                   top_k=10, alpha_max=10.0):
     results = []
     for l1 in L1_vals:
         for l2 in L2_vals:
             for t in tie_offsets:
                 for e in elbows:
-                    m = evaluate_combo(w, h, l, l1, l2, tie_offset=t, elbow_up=e)
+                    m = evaluate_combo(w, h, l, l1, l2, tie_offset=t, elbow_up=e, alpha_max=alpha_max)
                     m["combo"] = {"L1": float(l1), "L2": float(l2), "elbow_up": e, "tie_offset": t}
                     results.append(m)
     results.sort(key=lambda d: d["score"], reverse=True)
@@ -334,32 +362,33 @@ def print_top(results):
     for i, r in enumerate(results, 1):
         g = r["gain_center_deg_per_deg"]
         gtxt = f"{g:.3f}" if g is not None else "n/a"
+        r2 = r.get("linearity_r2")
+        r2txt = f"{r2:.3f}" if r2 is not None else "n/a"
         print(f"[{i:02}] score={r['score']:+.2f}  L1={r['L1']:.1f}  L2={r['L2']:.1f}  "
               f"elbow_up={r['elbow_up']}  tie={r['tie_offset']}  "
               f"coverage={100*r['coverage']:.0f}%  reversals={r['reversals']}  "
-              f"θspan={r['theta_span_deg']:.1f}°  dα/dθ₁@0={gtxt}")
+              f"θspan={r['theta_span_deg']:.1f}°  dα/dθ₁@0={gtxt}  lin.R²={r2txt}")
 
 
-# Example usage
 if __name__ == "__main__":
-    w = 20.0   # motor offset from center (x)
-    h = 100.0   # fulcrum height (y)
-    l1 = 46.0  # linkage 1 length
-    l2 = 85.0  # linkage 2 length
-    l  = 50.0  # half beam length
-    theta = 5.0  # beam angle (deg)
+    # Geometry parameters (mm)
+    w = 40.0   # motor offset from center (x)
+    h = 150.0   # fulcrum height (y)
+    l  = 60.0  # half beam length
+    theta = 5.0  # +/- beam angle (deg)
 
-        # Quick pass (coarse grid). Refine ranges around winners after first run.
-    L1_vals = np.linspace(30, 60, 30)   # try small grids first
-    L2_vals = np.linspace(70, 100, 30)
+    # Quick pass (coarse grid). Refine ranges around winners after first run.
+    L1_vals = np.linspace(30, 45, 100)
+    L2_vals = np.linspace(120, 140, 100)
 
     top, allres = search_lengths(
         w, h, l, 
         L1_vals=L1_vals,
         L2_vals=L2_vals,
-        tie_offsets=(None,),          # or (None, 40.0) to tie before the tip
+        tie_offsets=(None,),          
         elbows=(False,),
-        top_k=10
+        top_k=10,
+        alpha_max=theta
     )
     print_top(top)
 
