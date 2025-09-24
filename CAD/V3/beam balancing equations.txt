@@ -1,0 +1,14 @@
+﻿"motor center z" = 60mm
+"motor center y" = 20mm
+"link 1" = 40mm
+"link 2"= 90mm
+"pivot height"= 140mm
+"beam length" = 120mm
+"beam extra length" = 20mm
+"camera height" = 250mm
+"link 1 thickness" = 6mm
+"beam thickness"= 50mm
+"link height" = 12mm
+"pivot size" = 4mm
+"beam width" = 30mm
+"beam side wall thickness" = 3mm
