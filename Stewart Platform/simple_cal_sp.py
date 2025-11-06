@@ -1,14 +1,3 @@
-"""
-Simple Calibration for 3-Servo Stewart Platform (Camera Only)
--------------------------------------------------------------
-• Click on the ball in the live feed a few times to sample its color.
-• Press SPACE when done sampling.
-• Then click the 3 servo peg positions (A, B, C).
-• Press SPACE again to finish.
-
-Saves: config_sp.json with color thresholds, camera geometry, and scaling.
-"""
-
 import cv2
 import numpy as np
 import json
@@ -28,13 +17,18 @@ class SimpleCalibratorSP:
         self.pixel_to_meter_ratio = None
         self.origin_px = None
 
-        # assume platform diameter/edge distance known (approx.)
-        self.PLATFORM_EDGE_M = 0.10  # ~10 cm between servo pivots
+        # for persistent visualization
+        self.ball_contour = None
+        self.ball_center = None
+
+        # known approx. edge distance (m)
+        self.PLATFORM_EDGE_M = 0.10  
 
     def mouse_callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             if self.phase == "color":
                 self.sample_color(x, y)
+                self.detect_and_draw_ball()
             elif self.phase == "geometry" and len(self.platform_points) < 3:
                 self.platform_points.append((x, y))
                 print(f"[GEO] Point {len(self.platform_points)} selected at ({x}, {y})")
@@ -55,10 +49,26 @@ class SimpleCalibratorSP:
         self.upper_hsv = np.minimum([179,255,255], np.max(samples, axis=0) + [h_margin, s_margin, v_margin])
         print(f"[COLOR] Samples={len(self.hsv_samples)}  HSV range={self.lower_hsv}–{self.upper_hsv}")
 
+    def detect_and_draw_ball(self):
+        """Detect ball contour once color is sampled, hold the outline."""
+        if self.lower_hsv is None or self.current_frame is None:
+            return
+        hsv = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, self.lower_hsv, self.upper_hsv)
+        mask = cv2.medianBlur(mask, 5)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            (x, y), radius = cv2.minEnclosingCircle(largest)
+            if radius > 3:
+                self.ball_contour = largest
+                self.ball_center = (int(x), int(y))
+                print(f"[BALL] Center=({int(x)}, {int(y)}), radius={radius:.2f}")
+
     def compute_geometry(self):
         """Estimate pixel-to-meter ratio and center origin."""
         pts = np.array(self.platform_points, dtype=np.float32)
-        # average of edge lengths in pixels
         dists = [
             np.linalg.norm(pts[0]-pts[1]),
             np.linalg.norm(pts[1]-pts[2]),
@@ -91,6 +101,31 @@ class SimpleCalibratorSP:
             json.dump(data, f, indent=4)
         print("[SAVE] config_sp.json created successfully.")
 
+    def draw_overlays(self, frame):
+        """Draw visual overlays depending on current phase."""
+        # draw detected ball
+        if self.ball_contour is not None:
+            cv2.drawContours(frame, [self.ball_contour], -1, (0, 255, 255), 2)
+            if self.ball_center is not None:
+                cv2.circle(frame, self.ball_center, 5, (0, 0, 255), -1)
+
+        # draw triangle
+        if len(self.platform_points) > 0:
+            for i, p in enumerate(self.platform_points):
+                cv2.circle(frame, p, 5, (0, 0, 255), -1)
+                cv2.putText(frame, f"P{i+1}", (p[0]+5, p[1]-5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+        if len(self.platform_points) == 3:
+            pts = np.array(self.platform_points, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(frame, [pts], True, (255, 0, 0), 2)
+            # draw centroid (red dot)
+            cx = int(sum(p[0] for p in self.platform_points) / 3)
+            cy = int(sum(p[1] for p in self.platform_points) / 3)
+            cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
+            cv2.putText(frame, "Center", (cx + 10, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+
     def run(self):
         cap = cv2.VideoCapture(self.CAM_INDEX)
         cv2.namedWindow("Calibration")
@@ -104,28 +139,17 @@ class SimpleCalibratorSP:
             frame = cv2.resize(frame, (self.FRAME_W, self.FRAME_H))
             self.current_frame = frame.copy()
 
-            # draw current points
-            if self.phase == "geometry":
-                for i, p in enumerate(self.platform_points):
-                    cv2.circle(frame, p, 5, (0, 0, 255), -1)
-                    cv2.putText(frame, f"P{i+1}", (p[0]+5, p[1]-5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
-
-            # preview mask for color phase
-            if self.phase == "color" and self.lower_hsv is not None:
-                hsv = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2HSV)
-                mask = cv2.inRange(hsv, self.lower_hsv, self.upper_hsv)
-                frame = cv2.bitwise_and(frame, frame, mask=mask)
+            self.draw_overlays(frame)
 
             cv2.imshow("Calibration", frame)
             key = cv2.waitKey(1) & 0xFF
 
             if key == 27:  # ESC
                 break
-            elif key == 32:  # SPACE to advance
+            elif key == 32:  # SPACE
                 if self.phase == "color":
                     self.phase = "geometry"
-                    print("[INFO] Phase 2: click the three servo pivot points (A, B, C), then press SPACE.")
+                    print("[INFO] Phase 2: click 3 servo pivots (A,B,C).")
                 elif self.phase == "geometry" and len(self.platform_points) == 3:
                     self.compute_geometry()
                     print("[DONE] Calibration complete. ESC to exit.")
