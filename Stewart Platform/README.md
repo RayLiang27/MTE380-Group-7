@@ -25,7 +25,7 @@ All calibration data is saved to `Stewart Platform/config_sp.json`.
 | File | Purpose |
 |------|----------|
 | `simple_cal_sp.py` | Python calibration tool for servo, color, and geometry setup |
-| `servo_controller_platform.ino` | Arduino sketch to control servos via PCA9685 |
+| `servo_controller.ino` | Arduino sketch to control servos via PCA9685 |
 | `config_sp.json` | Generated configuration file storing calibration data |
 
 ---
@@ -33,7 +33,7 @@ All calibration data is saved to `Stewart Platform/config_sp.json`.
 ## Calibration Steps
 
 ### 1. Upload Arduino Sketch
-1. Open `servo_controller_platform.ino` in Arduino IDE.
+1. Open `servo_controller.ino` in Arduino IDE.
 2. Upload to the connected Arduino.
 3. Power the servo supply (platform should move to 60° neutral position).
 
