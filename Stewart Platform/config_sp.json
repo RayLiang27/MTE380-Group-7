@@ -1,0 +1,39 @@
+{
+    "timestamp": "2025-11-06T12:12:46.178705",
+    "camera": {
+        "index": 0,
+        "frame_width": 640,
+        "frame_height": 480
+    },
+    "calibration": {
+        "lower_hsv": [
+            0,
+            0,
+            235
+        ],
+        "upper_hsv": [
+            35,
+            255,
+            255
+        ],
+        "platform_points_px": [
+            [
+                432,
+                384
+            ],
+            [
+                170,
+                214
+            ],
+            [
+                588,
+                107
+            ]
+        ],
+        "origin_px": [
+            396.6666564941406,
+            235.0
+        ],
+        "pixel_to_meter_ratio": 0.00028256428777240217
+    }
+}
