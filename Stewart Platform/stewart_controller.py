@@ -1,0 +1,426 @@
+import cv2
+import numpy as np
+import json
+import serial
+import time
+import tkinter as tk
+from tkinter import ttk
+import matplotlib.pyplot as plt
+from threading import Thread
+import queue
+import os
+
+# Import the lightweight kinematics helper we added (safe — no plotting)
+try:
+    from spv4_kinematics import triangle_orientation_and_location, inverse_kinematics
+except Exception:
+    triangle_orientation_and_location = None
+    inverse_kinematics = None
+
+
+class StewartPIDController:
+    """Basic PID controller for Stewart Platform (3 servos).
+
+    Controls platform to move a tracked ball to the platform center using
+    two PID loops (X & Y). Maps the two-axis control outputs to three
+    servo angles using an equilateral 3-actuator mapping.
+
+    Assumptions/Notes:
+    - The calibration file `Stewart Platform/config_sp.json` contains
+      `calibration.origin_px` and `calibration.pixel_to_meter_ratio` and
+      `servo_calibration.neutral_angles_deg` saved by `simple_cal_sp.py`.
+    - Arduino expects triple-angle commands in the form "a1,a2,a3\n"
+      (this matches `simple_cal_sp.send_servo_angles`).
+    - This is a basic geometric mapping (small-angle, linear). For
+      accurate kinematics one should convert desired normal/orientation
+      to leg lengths and then to servo angles using `SPV4.inverse_kinematics`.
+    """
+
+    def __init__(self, config_path="Stewart Platform/config_sp.json"):
+        # Load config
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config not found: {config_path}")
+        with open(config_path, "r") as f:
+            self.config = json.load(f)
+
+        self.lower_hsv = None
+        self.upper_hsv = None
+        if self.config.get("calibration"):
+            lower = self.config['calibration'].get('lower_hsv')
+            upper = self.config['calibration'].get('upper_hsv')
+            if lower is not None and upper is not None:
+                self.lower_hsv = np.array(lower, dtype=np.uint8)
+                self.upper_hsv = np.array(upper, dtype=np.uint8)
+
+        self.pixel_to_meter = self.config['calibration'].get('pixel_to_meter_ratio', 1.0)
+        self.origin_px = np.array(self.config['calibration'].get('origin_px', [0, 0]), dtype=np.float32)
+
+        # Servo information
+        servos = self.config.get('servo_calibration', {}).get('neutral_angles_deg')
+        if servos and len(servos) >= 3:
+            self.neutral_angles = [int(s) for s in servos[:3]]
+        else:
+            # sensible reasonable default
+            self.neutral_angles = [90, 90, 90]
+
+        self.arduino_port = self.config.get('arduino_port', "/dev/cu.usbmodem1301")
+        self.baud_rate = int(self.config.get('baud_rate', 9600))
+        self.arduino = None
+
+        # PID defaults (two independent controllers)
+        self.Kp_x = 5.0
+        self.Ki_x = 0.0
+        self.Kd_x = 0.0
+        self.Kp_y = 5.0
+        self.Ki_y = 0.0
+        self.Kd_y = 0.0
+
+        # Internal PID state
+        self.integral_x = 0.0
+        self.integral_y = 0.0
+        self.prev_error_x = 0.0
+        self.prev_error_y = 0.0
+
+        # Mapping scale: how many degrees of servo per meter of ball displacement
+        self.mapping_scale = float(self.config.get('mapping_scale_deg_per_m', 600.0))
+
+        # Logs
+        self.time_log = []
+        self.pos_x_log = []
+        self.pos_y_log = []
+        self.setpoint_x_log = []
+        self.setpoint_y_log = []
+        self.servo_log = []
+
+        # runtime flags and queue
+        self.running = False
+        self.frame = None
+        self.FRAME_W = int(self.config.get('camera', {}).get('frame_width', 640))
+        self.FRAME_H = int(self.config.get('camera', {}).get('frame_height', 480))
+        self.cam_index = int(self.config.get('camera', {}).get('index', 0))
+        self.position_queue = queue.Queue(maxsize=1)
+
+        # setpoint: keep ball at the calibrated origin => error (0,0)
+        self.setpoint_px = self.origin_px.copy()
+
+    # ---------------- hardware -----------------
+    def connect_arduino(self):
+        try:
+            self.arduino = serial.Serial(self.arduino_port, self.baud_rate, timeout=2)
+            time.sleep(2)
+            print(f"[SERVO] Connected to Arduino on {self.arduino_port}")
+            return True
+        except Exception as e:
+            print(f"[SERVO] Could not open serial: {e}")
+            self.arduino = None
+            return False
+
+    def send_servo_angles(self, angles):
+        """Send angles as integers [a1,a2,a3] to Arduino.
+
+        If Arduino not connected, prints message (simulation mode).
+        """
+        # clip and convert
+        safe = [int(np.clip(a, 0, 255)) for a in angles] # TODO: find actual degree limits
+        if self.arduino:
+            cmd = f"{safe[0]},{safe[1]},{safe[2]}\n"
+            try:
+                self.arduino.write(cmd.encode())
+            except Exception as e:
+                print(f"[SERVO] Write error: {e}")
+        else:
+            print(f"[SERVO-SIM] -> {safe}")
+
+    # ---------------- vision -----------------
+    def detect_ball_center(self, frame):
+        """Detect ball using HSV thresholds from calibration.
+
+        Returns (found, center_px (x,y), vis_frame)
+        center_px is returned as numpy array float (x,y) or None.
+        """
+        vis = frame.copy()
+        if self.lower_hsv is None or self.upper_hsv is None:
+            # can't detect without HSV; return center None
+            return False, None, vis
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, self.lower_hsv, self.upper_hsv)
+        mask = cv2.medianBlur(mask, 5)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return False, None, vis
+
+        largest = max(contours, key=cv2.contourArea)
+        (x, y), radius = cv2.minEnclosingCircle(largest)
+        if radius < 3:
+            return False, None, vis
+
+        center = np.array([x, y], dtype=np.float32)
+        # draw
+        cv2.circle(vis, (int(x), int(y)), int(radius), (0, 255, 255), 2)
+        cv2.circle(vis, (int(x), int(y)), 3, (0, 0, 255), -1)
+        # draw origin
+        ox, oy = int(self.origin_px[0]), int(self.origin_px[1])
+        cv2.circle(vis, (ox, oy), 4, (255, 0, 0), -1)
+        cv2.line(vis, (ox, oy), (int(x), int(y)), (255, 0, 0), 1)
+        return True, center, vis
+
+    # ---------------- PID math ----------------
+    def update_pid(self, error, prev_error, integral, Kp, Ki, Kd, dt):
+        """Generic PID update returning (output, new_integral, new_prev_error)."""
+        integral_new = integral + error * dt
+        derivative = 0.0 if dt <= 0 else (error - prev_error) / dt
+        out = Kp * error + Ki * integral_new + Kd * derivative
+        return out, integral_new, error
+
+    # ---------------- camera & control threads ----------------
+    def camera_thread(self):
+        cap = cv2.VideoCapture(self.cam_index)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.FRAME_W)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.FRAME_H)
+        if not cap.isOpened():
+            print("[CAM] Could not open camera")
+            self.running = False
+            return
+
+        while self.running:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            frame = cv2.resize(frame, (self.FRAME_W, self.FRAME_H))
+            found, center, vis = self.detect_ball_center(frame)
+            if found and center is not None:
+                # put latest center into queue
+                try:
+                    if self.position_queue.full():
+                        _ = self.position_queue.get_nowait()
+                    self.position_queue.put_nowait(center)
+                except Exception:
+                    pass
+
+            cv2.imshow("SP Ball Tracking", vis)
+            if cv2.waitKey(1) & 0xFF == 27:
+                self.running = False
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+    def control_thread(self):
+        if not self.connect_arduino():
+            print("[INFO] Running in simulation mode (no Arduino)")
+        last_time = time.time()
+        self.start_time = last_time
+
+        while self.running:
+            try:
+                center = self.position_queue.get(timeout=0.1)
+                now = time.time()
+                dt = max(1e-6, now - last_time)
+                last_time = now
+
+                # compute error (pixel): positive x right, positive y down
+                error_px = self.setpoint_px - center  # want center -> setpoint
+                # convert to meters
+                error_m = error_px * self.pixel_to_meter
+                error_x_m = error_m[0]
+                error_y_m = error_m[1]
+
+                # PID X (horizontal) and Y (vertical)
+                out_x, self.integral_x, self.prev_error_x = self.update_pid(
+                    error_x_m, self.prev_error_x, self.integral_x,
+                    self.Kp_x, self.Ki_x, self.Kd_x, dt)
+
+                out_y, self.integral_y, self.prev_error_y = self.update_pid(
+                    error_y_m, self.prev_error_y, self.integral_y,
+                    self.Kp_y, self.Ki_y, self.Kd_y, dt)
+
+                # Use platform kinematics (if available) to compute servo angles.
+                # Interpret PID outputs as desired small tilt angles (radians) by
+                # applying a tilt_gain (radians per meter of ball displacement).
+                tilt_gain = float(self.config.get('tilt_gain_rad_per_m', 0.5))
+                # desired pitch (rotation about Y) and roll (rotation about X)
+                pitch_rad = out_y * tilt_gain #TODO: check
+                roll_rad = out_x * tilt_gain
+
+                # Construct normal vector by applying R_x(roll) * R_y(pitch) to [0,0,1]
+                cp = np.cos(pitch_rad)
+                sp = np.sin(pitch_rad)
+                cr = np.cos(roll_rad)
+                sr = np.sin(roll_rad)
+                # from derivation: n = [sin(pitch), -cos(pitch)*sin(roll), cos(pitch)*cos(roll)]
+                nrm = np.array([sp, -cp * sr, cp * cr])
+
+                # platform center height (meters) — default to 12 if not in config
+                platform_h = float(self.config.get('platform_height_m', 12.0))
+                S = np.array([0.0, 0.0, platform_h])
+
+                angles = None
+                if triangle_orientation_and_location is not None:
+                    try:
+                        res = triangle_orientation_and_location(nrm, S, initial_guess=5.0)
+                        # triangle_orientation_and_location returns theta_11, theta_21, theta_31 (degrees)
+                        t11 = float(res.get('theta_11', 0.0))
+                        t21 = float(res.get('theta_21', 0.0))
+                        t31 = float(res.get('theta_31', 0.0))
+                        # Compose servo commands as neutral + theta values (may need offset/tuning)
+                        angles = [self.neutral_angles[0] + t11,
+                                  self.neutral_angles[1] + t21,
+                                  self.neutral_angles[2] + t31]
+                    except Exception as e:
+                        print(f"[KIN] kinematics error: {e}")
+
+                # Fallback to linear mapping if kinematics failed or missing
+                if angles is None:
+                    pitch_deg = np.degrees(pitch_rad) * self.mapping_scale / 100.0
+                    roll_deg = np.degrees(roll_rad) * self.mapping_scale / 100.0
+                    d1 = pitch_deg
+                    d2 = -0.5 * pitch_deg + 0.86602540378 * roll_deg
+                    d3 = -0.5 * pitch_deg - 0.86602540378 * roll_deg
+                    angles = [self.neutral_angles[0] + d1,
+                              self.neutral_angles[1] + d2,
+                              self.neutral_angles[2] + d3]
+
+                # send to servos
+                self.send_servo_angles(angles)
+
+                # logging
+                t = now - self.start_time
+                self.time_log.append(t)
+                self.pos_x_log.append(center[0])
+                self.pos_y_log.append(center[1])
+                self.setpoint_x_log.append(self.setpoint_px[0])
+                self.setpoint_y_log.append(self.setpoint_px[1])
+                self.servo_log.append(angles)
+
+                print(f"t={t:.2f}s center={center.astype(int)} err_px={error_px.astype(int)} servo={list(map(int,angles))}")
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[CONTROL] error: {e}")
+                break
+
+        # cleanup on exit
+        if self.arduino:
+            self.send_servo_angles(self.neutral_angles)
+            try:
+                self.arduino.close()
+            except Exception:
+                pass
+
+    # ---------------- GUI and plotting ----------------
+    def create_gui(self):
+        self.root = tk.Tk()
+        self.root.title("Stewart Platform PID")
+        self.root.geometry("640x620")
+
+        # X axis (horizontal) gains
+        ttk.Label(self.root, text="Kp X").pack()
+        self.kp_x_var = tk.DoubleVar(value=self.Kp_x)
+        ttk.Scale(self.root, from_=0, to=100, variable=self.kp_x_var, orient=tk.HORIZONTAL, length=550).pack()
+        ttk.Label(self.root, text="Ki X").pack()
+        self.ki_x_var = tk.DoubleVar(value=self.Ki_x)
+        ttk.Scale(self.root, from_=0, to=50, variable=self.ki_x_var, orient=tk.HORIZONTAL, length=550).pack()
+        ttk.Label(self.root, text="Kd X").pack()
+        self.kd_x_var = tk.DoubleVar(value=self.Kd_x)
+        ttk.Scale(self.root, from_=0, to=50, variable=self.kd_x_var, orient=tk.HORIZONTAL, length=550).pack()
+
+        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill='x', pady=6)
+
+        # Y axis gains
+        ttk.Label(self.root, text="Kp Y").pack()
+        self.kp_y_var = tk.DoubleVar(value=self.Kp_y)
+        ttk.Scale(self.root, from_=0, to=100, variable=self.kp_y_var, orient=tk.HORIZONTAL, length=550).pack()
+        ttk.Label(self.root, text="Ki Y").pack()
+        self.ki_y_var = tk.DoubleVar(value=self.Ki_y)
+        ttk.Scale(self.root, from_=0, to=50, variable=self.ki_y_var, orient=tk.HORIZONTAL, length=550).pack()
+        ttk.Label(self.root, text="Kd Y").pack()
+        self.kd_y_var = tk.DoubleVar(value=self.Kd_y)
+        ttk.Scale(self.root, from_=0, to=50, variable=self.kd_y_var, orient=tk.HORIZONTAL, length=550).pack()
+
+        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill='x', pady=6)
+
+        ttk.Label(self.root, text="Mapping scale (deg per meter)").pack()
+        self.mapping_var = tk.DoubleVar(value=self.mapping_scale)
+        ttk.Scale(self.root, from_=50, to=2000, variable=self.mapping_var, orient=tk.HORIZONTAL, length=550).pack()
+
+        btn_frame = ttk.Frame(self.root)
+        btn_frame.pack(pady=8)
+        ttk.Button(btn_frame, text="Reset Integrals", command=self.reset_integrals).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="Plot Results", command=self.plot_results).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="Stop", command=self.stop).pack(side=tk.LEFT, padx=6)
+
+        self.root.after(100, self.gui_update)
+
+    def gui_update(self):
+        if self.running:
+            self.Kp_x = self.kp_x_var.get()
+            self.Ki_x = self.ki_x_var.get()
+            self.Kd_x = self.kd_x_var.get()
+            self.Kp_y = self.kp_y_var.get()
+            self.Ki_y = self.ki_y_var.get()
+            self.Kd_y = self.kd_y_var.get()
+            self.mapping_scale = self.mapping_var.get()
+            self.root.after(100, self.gui_update)
+
+    def reset_integrals(self):
+        self.integral_x = 0.0
+        self.integral_y = 0.0
+        print("[RESET] Integrals cleared")
+
+    def plot_results(self):
+        if not self.time_log:
+            print("[PLOT] no data to plot")
+            return
+        fig, axs = plt.subplots(3, 1, figsize=(8, 10))
+        axs[0].plot(self.time_log, self.pos_x_log, label='ball_x_px')
+        axs[0].plot(self.time_log, self.setpoint_x_log, '--', label='setpoint_x')
+        axs[0].legend(); axs[0].grid(True)
+        axs[1].plot(self.time_log, self.pos_y_log, label='ball_y_px')
+        axs[1].plot(self.time_log, self.setpoint_y_log, '--', label='setpoint_y')
+        axs[1].legend(); axs[1].grid(True)
+        # servo angles
+        servo_arr = np.array(self.servo_log)
+        if servo_arr.size:
+            axs[2].plot(self.time_log, servo_arr[:, 0], label='s1')
+            axs[2].plot(self.time_log, servo_arr[:, 1], label='s2')
+            axs[2].plot(self.time_log, servo_arr[:, 2], label='s3')
+            axs[2].legend(); axs[2].grid(True)
+        plt.tight_layout()
+        plt.show()
+
+    def stop(self):
+        self.running = False
+        try:
+            self.root.quit()
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def run(self):
+        print("[INFO] Starting Stewart Platform PID controller")
+        self.running = True
+
+        cam_thread = Thread(target=self.camera_thread, daemon=True)
+        ctrl_thread = Thread(target=self.control_thread, daemon=True)
+        cam_thread.start()
+        ctrl_thread.start()
+
+        # GUI runs in main thread
+        self.create_gui()
+        self.root.mainloop()
+
+        # cleanup
+        self.running = False
+        print("[INFO] Controller stopped")
+
+
+if __name__ == '__main__':
+    try:
+        controller = StewartPIDController()
+        controller.run()
+    except FileNotFoundError as e:
+        print(f"[ERROR] {e}")
+    except Exception as e:
+        print(f"[ERROR] {e}")

@@ -61,7 +61,7 @@ class SimpleCalibratorSP:
         """Step 1: Level the platform."""
         self.connect_arduino()
         print("\n=== SERVO CALIBRATION ===")
-        print("Moving all servos to neutral 60° position.")
+        print("Moving all servos to neutral position.")
         self.send_servo_angles(NEUTRAL_ANGLES)
         print("Setting servos to neutral position...")
         time.sleep(2)  # Give servos time to move
