@@ -4,12 +4,12 @@
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
 #define SERVO_FREQ 50
-#define SERVOMIN 250
+#define SERVOMIN 310
 #define SERVOMAX 450
 const int servoChannels[3] = {2, 5, 7};
 
 int angleToPulse(int angle) {
-  return map(angle, 0, 180, SERVOMIN, SERVOMAX); //TODO: find the real angle range of motion.
+  return map(angle, 0, 70, SERVOMIN, SERVOMAX); //TODO: find the real angle range of motion.
 }
 
 void setup() {
