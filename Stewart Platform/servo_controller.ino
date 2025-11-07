@@ -8,12 +8,16 @@ Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 #define SERVOMAX 450
 const int servoChannels[3] = {2, 5, 7};
 
-int angleToPulse(int angle) {
-  return map(angle, 0, 70, SERVOMIN, SERVOMAX); //TODO: find the real angle range of motion.
+uint16_t intmap(uint16_t x, uint16_t in_min, uint16_t in_max, uint16_t out_min, uint16_t out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+uint16_t angleToPulse(uint16_t angle) {
+  return intmap(angle, 0, 70, SERVOMIN, SERVOMAX); //TODO: find the real angle range of motion.
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   pwm.begin();
   pwm.setPWMFreq(SERVO_FREQ);
   delay(500);
@@ -28,8 +32,8 @@ void loop() {
       pwm.setPWM(servoChannels[0], 0, angleToPulse(a1));
       pwm.setPWM(servoChannels[1], 0, angleToPulse(a2));
       pwm.setPWM(servoChannels[2], 0, angleToPulse(a3));
-      Serial.print("Set angles: ");
-      Serial.println(input);
+      // Serial.print("Set angles: ");
+      // Serial.println(input);
     }
   }
 }
