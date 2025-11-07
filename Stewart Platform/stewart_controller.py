@@ -61,9 +61,10 @@ class StewartPIDController:
             self.neutral_angles = [int(s) for s in servos[:3]]
         else:
             # sensible reasonable default
-            self.neutral_angles = [90, 90, 90]
+            self.neutral_angles = [50, 50, 50]
 
-        self.arduino_port = self.config.get('arduino_port', "/dev/cu.usbmodem1301")
+        # self.arduino_port = self.config.get('arduino_port', "/dev/cu.usbmodem1301")
+        self.arduino_port = self.config.get('arduino_port', "COM4")
         self.baud_rate = int(self.config.get('baud_rate', 9600))
         self.arduino = None
 
@@ -121,7 +122,7 @@ class StewartPIDController:
         If Arduino not connected, prints message (simulation mode).
         """
         # clip and convert
-        safe = [int(np.clip(a, 0, 255)) for a in angles] # TODO: find actual degree limits
+        safe = [int(np.clip(a, 0, 70)) for a in angles] # TODO: find actual degree limits
         if self.arduino:
             cmd = f"{safe[0]},{safe[1]},{safe[2]}\n"
             try:
@@ -183,6 +184,8 @@ class StewartPIDController:
             self.running = False
             return
 
+        print("[CAM] Camera opened")
+
         while self.running:
             ret, frame = cap.read()
             if not ret:
@@ -212,7 +215,10 @@ class StewartPIDController:
         last_time = time.time()
         self.start_time = last_time
 
+
+        ## TODO Interchange
         while self.running:
+        # while self.running and not self.position_queue.empty():
             try:
                 center = self.position_queue.get(timeout=0.1)
                 now = time.time()
@@ -263,10 +269,17 @@ class StewartPIDController:
                         t11 = float(res.get('theta_11', 0.0))
                         t21 = float(res.get('theta_21', 0.0))
                         t31 = float(res.get('theta_31', 0.0))
+                        # print(res)
                         # Compose servo commands as neutral + theta values (may need offset/tuning)
-                        angles = [self.neutral_angles[0] + t11,
-                                  self.neutral_angles[1] + t21,
-                                  self.neutral_angles[2] + t31]
+                        angles = [t11 - 10,
+                                  t21 - 10,
+                                  t31 - 10]
+                        
+                        """
+                        self.neutral_angles[0] - 
+                        self.neutral_angles[1] - 
+                        self.neutral_angles[2] - """
+
                     except Exception as e:
                         print(f"[KIN] kinematics error: {e}")
 
@@ -284,16 +297,17 @@ class StewartPIDController:
                 # send to servos
                 self.send_servo_angles(angles)
 
-                # logging
+                # logging  - no - a human
                 t = now - self.start_time
-                self.time_log.append(t)
-                self.pos_x_log.append(center[0])
-                self.pos_y_log.append(center[1])
-                self.setpoint_x_log.append(self.setpoint_px[0])
-                self.setpoint_y_log.append(self.setpoint_px[1])
-                self.servo_log.append(angles)
+                # self.time_log.append(t)
+                # self.pos_x_log.append(center[0])
+                # self.pos_y_log.append(center[1])
+                # self.setpoint_x_log.append(self.setpoint_px[0])
+                # self.setpoint_y_log.append(self.setpoint_px[1])
+                # self.servo_log.append(angles)
 
-                print(f"t={t:.2f}s center={center.astype(int)} err_px={error_px.astype(int)} servo={list(map(int,angles))}")
+                print(f"qsize: {self.position_queue.qsize()}")
+                print(f"t={t:.2f}s center={center.astype(int)} err_px={error_px.astype(int)} PID_out=[{out_x} {out_y}] servo={list(map(int,angles))}")
 
             except queue.Empty:
                 continue
@@ -399,7 +413,7 @@ class StewartPIDController:
             pass
 
     def run(self):
-        print("[INFO] Starting Stewart Platform PID controller")
+        print("[\033[92m INFO \033[0m] Starting Stewart Platform PID controller")
         self.running = True
 
         cam_thread = Thread(target=self.camera_thread, daemon=True)
@@ -415,11 +429,42 @@ class StewartPIDController:
         self.running = False
         print("[INFO] Controller stopped")
 
+    def TEST_input(self):
+        le_in = ""
+
+        while le_in != "EXIT":
+            le_in = input("Enter as err_x,err_y or EXIT: ")
+
+            if le_in == "EXIT":
+                continue
+
+            le_x = float(le_in.split(",")[0])
+            le_y = float(le_in.split(",")[1])
+            center = np.array([le_x, le_y], dtype=np.float32)
+
+            try:
+                if self.position_queue.full():
+                    _ = self.position_queue.get_nowait()
+                self.position_queue.put_nowait(center)
+                self.control_thread()
+            except Exception:
+                pass
+
+    def TEST_run(self):
+        print("[\033[93m TEST \033[0m] Starting PID controller")
+        # test_inp_thread = Thread(target=self.TEST_input, daemon=True)
+        # ctrl_thread = Thread(target=self.control_thread, daemon=True)
+        # test_inp_thread.start()
+        # ctrl_thread.start()
+        self.running = True
+        self.TEST_input()
+
 
 if __name__ == '__main__':
     try:
         controller = StewartPIDController()
         controller.run()
+        # controller.TEST_run()
     except FileNotFoundError as e:
         print(f"[ERROR] {e}")
     except Exception as e:

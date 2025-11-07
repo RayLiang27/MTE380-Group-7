@@ -19,6 +19,17 @@ l_3 = 10
 l_31 = 8
 l_32 = 8
 
+# l = 25
+# l_1 = 5
+# l_11 = 8
+# l_12 = 9
+# l_2 = 5
+# l_21 = 8
+# l_22 = 9
+# l_3 = 5
+# l_31 = 8
+# l_32 = 9
+
 
 def position_and_orientation(nrm, S, l_val=l):
     """Compute platform vertex positions P1,P2,P3 from a normal `nrm` and center S.
@@ -160,3 +171,6 @@ def inverse_kinematics(l_val, l_1_val, l_11_val, l_12_val, l_2_val, l_21_val, l_
                                              l_val=l_val, l_1_val=l_1_val, l_11_val=l_11_val, l_12_val=l_12_val,
                                              l_2_val=l_2_val, l_21_val=l_21_val, l_22_val=l_22_val,
                                              l_3_val=l_3_val, l_31_val=l_31_val, l_32_val=l_32_val)
+
+# if __name__ == '__main__':
+    

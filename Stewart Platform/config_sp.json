@@ -38,9 +38,9 @@
     },
     "servo_calibration": {
         "neutral_angles_deg": [
-            200,
-            200,
-            200
+            50,
+            50,
+            50
         ]
     }
 }
