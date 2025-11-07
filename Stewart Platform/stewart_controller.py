@@ -10,6 +10,11 @@ from threading import Thread
 import queue
 import os
 
+try:
+    cv2.setNumThreads(1)
+except Exception:
+    pass
+
 # Import the lightweight kinematics helper we added (safe — no plotting)
 try:
     from spv4_kinematics import triangle_orientation_and_location, inverse_kinematics
@@ -65,7 +70,7 @@ class StewartPIDController:
 
         # self.arduino_port = self.config.get('arduino_port', "/dev/cu.usbmodem1301")
         self.arduino_port = self.config.get('arduino_port', "COM4")
-        self.baud_rate = int(self.config.get('baud_rate', 9600))
+        self.baud_rate = int(self.config.get('baud_rate', 115200))
         self.arduino = None
 
         # PID defaults (two independent controllers)
@@ -176,9 +181,15 @@ class StewartPIDController:
 
     # ---------------- camera & control threads ----------------
     def camera_thread(self):
-        cap = cv2.VideoCapture(self.cam_index)
+        # cap = cv2.VideoCapture(self.cam_index)
+        # cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.FRAME_W)
+        # cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.FRAME_H)
+
+        cap = cv2.VideoCapture(self.cam_index, cv2.CAP_DSHOW)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.FRAME_W)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.FRAME_H)
+        cap.set(cv2.CAP_PROP_FPS, 60)  # hint only
+        
         if not cap.isOpened():
             print("[CAM] Could not open camera")
             self.running = False
@@ -294,11 +305,15 @@ class StewartPIDController:
                               self.neutral_angles[1] + d2,
                               self.neutral_angles[2] + d3]
 
+                t = time.time() - self.start_time
+
+                print(f"t={t:.2f}s")
+
                 # send to servos
                 self.send_servo_angles(angles)
 
-                # logging  - no - a human
-                t = now - self.start_time
+                # logging     bad - a human
+                t = time.time() - self.start_time
                 # self.time_log.append(t)
                 # self.pos_x_log.append(center[0])
                 # self.pos_y_log.append(center[1])

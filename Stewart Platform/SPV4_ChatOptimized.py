@@ -466,3 +466,13 @@ class StewartPIDController:
         cam_thread.join(timeout=1.0)
         ctrl_thread.join(timeout=1.0)
         logging.info("[INFO] Controller stopped")
+
+
+if __name__ == '__main__':
+    try:
+        controller = StewartPIDController()
+        controller.run()
+    except FileNotFoundError as e:
+        print(f"[ERROR] {e}")
+    except Exception as e:
+        print(f"[ERROR] {e}")
