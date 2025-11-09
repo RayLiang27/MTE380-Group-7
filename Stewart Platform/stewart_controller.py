@@ -18,6 +18,7 @@ except Exception:
 # Import the lightweight kinematics helper we added (safe — no plotting)
 try:
     from spv4_kinematics import triangle_orientation_and_location, inverse_kinematics
+    from SPV4_linkagesim import inverse_kinematics_from_orientation
 except Exception:
     triangle_orientation_and_location = None
     inverse_kinematics = None
@@ -69,7 +70,7 @@ class StewartPIDController:
             self.neutral_angles = [50, 50, 50]
 
         # self.arduino_port = self.config.get('arduino_port', "/dev/cu.usbmodem1301")
-        self.arduino_port = self.config.get('arduino_port', "COM4")
+        self.arduino_port = self.config.get('arduino_port', "COM5")
         self.baud_rate = int(self.config.get('baud_rate', 115200))
         self.arduino = None
 
@@ -255,55 +256,73 @@ class StewartPIDController:
                 # Use platform kinematics (if available) to compute servo angles.
                 # Interpret PID outputs as desired small tilt angles (radians) by
                 # applying a tilt_gain (radians per meter of ball displacement).
-                tilt_gain = float(self.config.get('tilt_gain_rad_per_m', 0.5))
+                # tilt_gain = float(self.config.get('tilt_gain_rad_per_m', 0.5))
                 # desired pitch (rotation about Y) and roll (rotation about X)
-                pitch_rad = out_y * tilt_gain #TODO: check
-                roll_rad = out_x * tilt_gain
+                # pitch_rad = out_y * tilt_gain #TODO: check
+                # roll_rad = out_x * tilt_gain
+                z_scale_factor = np.float64(1.0)  
+
+                out_z = z_scale_factor / np.sqrt(out_x**2 + out_y**2)
+                normal_mag = np.sqrt(out_x**2 + out_y**2 + out_z**2)
+                out_x_norm = out_x / normal_mag
+                out_y_norm = -out_y / normal_mag
+                out_z_norm = out_z / normal_mag
+                normal = np.array([out_x_norm, out_y_norm, out_z_norm])
+                print(f"[KIN] desired normal (pre-norm): {normal}")
 
                 # Construct normal vector by applying R_x(roll) * R_y(pitch) to [0,0,1]
-                cp = np.cos(pitch_rad)
-                sp = np.sin(pitch_rad)
-                cr = np.cos(roll_rad)
-                sr = np.sin(roll_rad)
+                # cp = np.cos(pitch_rad)
+                # sp = np.sin(pitch_rad)
+                # cr = np.cos(roll_rad)
+                # sr = np.sin(roll_rad)
                 # from derivation: n = [sin(pitch), -cos(pitch)*sin(roll), cos(pitch)*cos(roll)]
-                nrm = np.array([sp, -cp * sr, cp * cr])
+                # nrm = np.array([-sp * cr, sr, cp * cr])
+                nrm = normal
+                # print(f"[KIN] nrm: {nrm}, pitch: {np.degrees(pitch_rad):.2f} deg, roll: {np.degrees(roll_rad):.2f} deg")
 
                 # platform center height (meters) — default to 12 if not in config
-                platform_h = float(self.config.get('platform_height_m', 12.0))
+                platform_h = float(self.config.get('platform_height_m', 10.0))
                 S = np.array([0.0, 0.0, platform_h])
+                res = inverse_kinematics_from_orientation(nrm, S, elbow_up=True, verbose=False)
+                legs = res['legs']
+                t11 = legs[0].get('theta2_deg', 0.0)
+                t21 = legs[1].get('theta2_deg', 0.0)
+                t31 = legs[2].get('theta2_deg', 0.0)
+                angles = [self.neutral_angles[0]-t11, self.neutral_angles[1]-t21, self.neutral_angles[2]-t31]
 
-                angles = None
-                if triangle_orientation_and_location is not None:
-                    try:
-                        res = triangle_orientation_and_location(nrm, S, initial_guess=5.0)
-                        # triangle_orientation_and_location returns theta_11, theta_21, theta_31 (degrees)
-                        t11 = float(res.get('theta_11', 0.0))
-                        t21 = float(res.get('theta_21', 0.0))
-                        t31 = float(res.get('theta_31', 0.0))
-                        # print(res)
-                        # Compose servo commands as neutral + theta values (may need offset/tuning)
-                        angles = [t11 - 10,
-                                  t21 - 10,
-                                  t31 - 10]
+                # angles = None
+                # if triangle_orientation_and_location is not None:
+                #     try:
+                #         res = triangle_orientation_and_location(nrm, S, initial_guess=5.0)
+                #         print(f"[KIN] Platform points: P1={res['P1']}, P2={res['P2']}, P3={res['P3']}")
+                #         # triangle_orientation_and_location returns theta_11, theta_21, theta_31 (degrees)
+                #         t11 = float(res.get('theta_11', 0.0))
+                #         t21 = float(res.get('theta_21', 0.0))
+                #         t31 = float(res.get('theta_31', 0.0))
+                #         # print(res)
+                #         # Compose servo commands as neutral + theta values (may need offset/tuning)
+                #         angles = [t11 - 10,
+                #                   t21 - 10,
+                #                   t31 - 10]
                         
-                        """
-                        self.neutral_angles[0] - 
-                        self.neutral_angles[1] - 
-                        self.neutral_angles[2] - """
+                #         """
+                #         self.neutral_angles[0] - 
+                #         self.neutral_angles[1] - 
+                #         self.neutral_angles[2] - """
 
-                    except Exception as e:
-                        print(f"[KIN] kinematics error: {e}")
+                #     except Exception as e:
+                #         print(f"[KIN] kinematics error: {e}")
 
-                # Fallback to linear mapping if kinematics failed or missing
-                if angles is None:
-                    pitch_deg = np.degrees(pitch_rad) * self.mapping_scale / 100.0
-                    roll_deg = np.degrees(roll_rad) * self.mapping_scale / 100.0
-                    d1 = pitch_deg
-                    d2 = -0.5 * pitch_deg + 0.86602540378 * roll_deg
-                    d3 = -0.5 * pitch_deg - 0.86602540378 * roll_deg
-                    angles = [self.neutral_angles[0] + d1,
-                              self.neutral_angles[1] + d2,
-                              self.neutral_angles[2] + d3]
+                # # Fallback to linear mapping if kinematics failed or missing
+                # if angles is None:
+                #     pitch_deg = np.degrees(pitch_rad) * self.mapping_scale / 100.0
+                #     roll_deg = np.degrees(roll_rad) * self.mapping_scale / 100.0
+                #     d1 = pitch_deg
+                #     d2 = -0.5 * pitch_deg + 0.86602540378 * roll_deg
+                #     d3 = -0.5 * pitch_deg - 0.86602540378 * roll_deg
+                #     angles = [self.neutral_angles[0] + d1,
+                #               self.neutral_angles[1] + d2,
+                #               self.neutral_angles[2] + d3]
 
                 t = time.time() - self.start_time
 
@@ -484,3 +503,81 @@ if __name__ == '__main__':
         print(f"[ERROR] {e}")
     except Exception as e:
         print(f"[ERROR] {e}")
+
+#     def test_platform_orientation(self):
+#         """Test platform by rotating normal vector like SPV4_linkagesim"""
+#         if not self.connect_arduino():
+#             print("[ERROR] Cannot test - Arduino not connected")
+#             return
+
+#         # Similar parameters to SPV4_linkagesim test
+#         phi = np.deg2rad(70.0)  # Fixed tilt angle
+#         platform_h = float(self.config.get('platform_height_m', 10.0))
+#         S = np.array([0.0, 0.0, platform_h])
+        
+#         try:
+#             while self.running:
+#                 # Rotate alpha over time like SPV4_linkagesim
+#                 t = time.time() - self.start_time
+#                 alpha = (t) % (2 * np.pi)  # Complete rotation every 4π seconds
+                
+#                 # Compute normal vector
+#                 nrm = np.array([
+#                     np.cos(phi) * np.cos(alpha),
+#                     np.cos(phi) * np.sin(alpha),
+#                     np.sin(phi)
+#                 ])
+#                 print("[TEST] Normal vector:", nrm)
+#                 # Get servo angles using the same solver as SPV4_linkagesim
+#                 res = inverse_kinematics_from_orientation(nrm, S, elbow_up=True)
+#                 legs = res['legs']
+
+#                 # Extract angles and apply to servos
+#                 if all(leg is not None for leg in legs.values()):
+#                     t11 = legs[0].get('theta2_deg', 0.0)
+#                     t21 = legs[1].get('theta2_deg', 0.0)
+#                     t31 = legs[2].get('theta2_deg', 0.0)
+                    
+#                     # Convert to servo commands (adjust neutral angles as needed)
+#                     angles = [
+#                         self.neutral_angles[0] - t11,
+#                         self.neutral_angles[1] - t21, 
+#                         self.neutral_angles[2] - t31
+#                     ]
+                    
+#                     # Send to servos
+#                     self.send_servo_angles(angles)
+                    
+#                     # Print status
+#                     print(f"t={t:.1f}s alpha={np.degrees(alpha):.1f}° angles={[int(a) for a in angles]}")
+                
+#                 # Sleep to control update rate
+#                 time.sleep(0.05)
+
+#         except KeyboardInterrupt:
+#             print("\n[INFO] Test stopped by user")
+#         finally:
+#             # Return to neutral
+#             self.send_servo_angles(self.neutral_angles)
+#             if self.arduino:
+#                 self.arduino.close()
+
+# if __name__ == '__main__':
+#     try:
+#         controller = StewartPIDController()
+        
+#         # Add command line argument handling
+#         import sys
+#         # if len(sys.argv) > 1 and sys.argv[1] == 'test_orientation':
+#         print("[INFO] Running orientation test mode")
+#         controller.running = True
+#         controller.start_time = time.time()
+#         controller.test_platform_orientation()
+#         # else:
+#         #     # Normal PID control mode
+#         #     controller.run()
+            
+#     except FileNotFoundError as e:
+#         print(f"[ERROR] {e}")
+#     except Exception as e:
+#         print(f"[ERROR] {e}")

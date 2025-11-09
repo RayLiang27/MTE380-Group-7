@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 
 # Default neutral servo angles (degrees)
-NEUTRAL_ANGLES = [200, 200, 200]
+NEUTRAL_ANGLES = [50, 55, 45]
 
 class SimpleCalibratorSP:
     def __init__(self):
@@ -32,7 +32,7 @@ class SimpleCalibratorSP:
         self.PLATFORM_EDGE_M = 0.10
 
         # Arduino serial setup
-        self.arduino_port = "/dev/cu.usbmodem1301"  # Update as needed (COM3 on Windows)
+        self.arduino_port = "COM5" #"/dev/cu.usbmodem1301"  # Update as needed (COM3 on Windows)
         self.baud_rate = 9600
         self.arduino = None
 
