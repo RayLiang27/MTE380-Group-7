@@ -75,12 +75,12 @@ class StewartPIDController:
         self.arduino = None
 
         # PID defaults (two independent controllers)
-        self.Kp_x = 5.0
+        self.Kp_x = 2.5
         self.Ki_x = 0.0
-        self.Kd_x = 0.0
-        self.Kp_y = 5.0
+        self.Kd_x = 0.9
+        self.Kp_y = 2.5
         self.Ki_y = 0.0
-        self.Kd_y = 0.0
+        self.Kd_y = 0.9
 
         # Internal PID state
         self.integral_x = 0.0
@@ -159,7 +159,7 @@ class StewartPIDController:
 
         largest = max(contours, key=cv2.contourArea)
         (x, y), radius = cv2.minEnclosingCircle(largest)
-        if radius < 3:
+        if radius < 12:
             return False, None, vis
 
         center = np.array([x, y], dtype=np.float32)
@@ -261,13 +261,14 @@ class StewartPIDController:
                 # pitch_rad = out_y * tilt_gain #TODO: check
                 # roll_rad = out_x * tilt_gain
                 z_scale_factor = np.float64(1.0)  
-
-                out_z = z_scale_factor / np.sqrt(out_x**2 + out_y**2)
-                normal_mag = np.sqrt(out_x**2 + out_y**2 + out_z**2)
-                out_x_norm = out_x / normal_mag
-                out_y_norm = -out_y / normal_mag
-                out_z_norm = out_z / normal_mag
-                normal = np.array([out_x_norm, out_y_norm, out_z_norm])
+                out_z = 1.0
+                # out_z = z_scale_factor / np.sqrt(out_x**2 + out_y**2)
+                # normal_mag = np.sqrt(out_x**2 + out_y**2 + out_z**2)
+                # out_x_norm = out_x / normal_mag
+                # out_y_norm = -out_y / normal_mag
+                # out_z_norm = out_z / normal_mag
+                normal = np.array([out_x, -out_y, out_z])
+                nrm = normal / np.linalg.norm(normal)
                 print(f"[KIN] desired normal (pre-norm): {normal}")
 
                 # Construct normal vector by applying R_x(roll) * R_y(pitch) to [0,0,1]
@@ -277,7 +278,7 @@ class StewartPIDController:
                 # sr = np.sin(roll_rad)
                 # from derivation: n = [sin(pitch), -cos(pitch)*sin(roll), cos(pitch)*cos(roll)]
                 # nrm = np.array([-sp * cr, sr, cp * cr])
-                nrm = normal
+                # nrm = normal
                 # print(f"[KIN] nrm: {nrm}, pitch: {np.degrees(pitch_rad):.2f} deg, roll: {np.degrees(roll_rad):.2f} deg")
 
                 # platform center height (meters) — default to 12 if not in config
@@ -285,9 +286,13 @@ class StewartPIDController:
                 S = np.array([0.0, 0.0, platform_h])
                 res = inverse_kinematics_from_orientation(nrm, S, elbow_up=True, verbose=False)
                 legs = res['legs']
-                t11 = legs[0].get('theta2_deg', 0.0)
-                t21 = legs[1].get('theta2_deg', 0.0)
-                t31 = legs[2].get('theta2_deg', 0.0)
+                print(legs)
+                if None in legs:
+                    legs = self.neutral_angles
+
+                t11 = legs[0].get('theta2_deg', 0.0) if legs[0] else self.neutral_angles[0]
+                t21 = legs[1].get('theta2_deg', 0.0) if legs[1] else self.neutral_angles[1]
+                t31 = legs[2].get('theta2_deg', 0.0) if legs[2] else self.neutral_angles[2]
                 angles = [self.neutral_angles[0]-t11, self.neutral_angles[1]-t21, self.neutral_angles[2]-t31]
 
                 # angles = None
@@ -345,9 +350,9 @@ class StewartPIDController:
 
             except queue.Empty:
                 continue
-            except Exception as e:
-                print(f"[CONTROL] error: {e}")
-                break
+            # except Exception as e:
+            #     print(f"[CONTROL] error: {e}")
+            #     break
 
         # cleanup on exit
         if self.arduino:
@@ -357,49 +362,135 @@ class StewartPIDController:
             except Exception:
                 pass
 
-    # ---------------- GUI and plotting ----------------
     def create_gui(self):
         self.root = tk.Tk()
         self.root.title("Stewart Platform PID")
-        self.root.geometry("640x620")
+        self.root.geometry("640x720")
 
-        # X axis (horizontal) gains
-        ttk.Label(self.root, text="Kp X").pack()
+        # Function to create a labeled scale with entry
+        def create_param_control(parent, label, var, from_, to_, row):
+            frame = ttk.Frame(parent)
+            frame.grid(row=row, column=0, pady=5, sticky='ew')
+            
+            # Label
+            ttk.Label(frame, text=label, width=15).grid(row=0, column=0)
+            
+            # Scale
+            scale = ttk.Scale(frame, from_=from_, to=to_, variable=var, 
+                            orient=tk.HORIZONTAL, length=400)
+            scale.grid(row=0, column=1, padx=5)
+            
+            # Entry for direct value input
+            entry = ttk.Entry(frame, width=8, justify=tk.RIGHT)
+            entry.grid(row=0, column=2, padx=5)
+            
+            # Update functions
+            def update_entry(event=None):
+                entry.delete(0, tk.END)
+                entry.insert(0, f"{var.get():.3f}")
+                
+            def update_scale(event=None):
+                try:
+                    value = float(entry.get())
+                    var.set(value)
+                except ValueError:
+                    update_entry()
+                    
+            scale.configure(command=update_entry)
+            entry.bind('<Return>', update_scale)
+            entry.bind('<FocusOut>', update_scale)
+            
+            # Initial value
+            update_entry()
+            
+            return frame
+
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(expand=True, fill='both', padx=10, pady=5)
+
+        # X axis controls
+        ttk.Label(main_frame, text="X Axis Control", font=('Arial', 10, 'bold')).grid(row=0, column=0, pady=10)
         self.kp_x_var = tk.DoubleVar(value=self.Kp_x)
-        ttk.Scale(self.root, from_=0, to=100, variable=self.kp_x_var, orient=tk.HORIZONTAL, length=550).pack()
-        ttk.Label(self.root, text="Ki X").pack()
         self.ki_x_var = tk.DoubleVar(value=self.Ki_x)
-        ttk.Scale(self.root, from_=0, to=50, variable=self.ki_x_var, orient=tk.HORIZONTAL, length=550).pack()
-        ttk.Label(self.root, text="Kd X").pack()
         self.kd_x_var = tk.DoubleVar(value=self.Kd_x)
-        ttk.Scale(self.root, from_=0, to=50, variable=self.kd_x_var, orient=tk.HORIZONTAL, length=550).pack()
+        create_param_control(main_frame, "Kp X", self.kp_x_var, 0, 10, 1)
+        create_param_control(main_frame, "Ki X", self.ki_x_var, 0, 10, 2)
+        create_param_control(main_frame, "Kd X", self.kd_x_var, 0, 10, 3)
 
-        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill='x', pady=6)
+        ttk.Separator(main_frame, orient=tk.HORIZONTAL).grid(row=4, column=0, sticky='ew', pady=10)
 
-        # Y axis gains
-        ttk.Label(self.root, text="Kp Y").pack()
+        # Y axis controls
+        ttk.Label(main_frame, text="Y Axis Control", font=('Arial', 10, 'bold')).grid(row=5, column=0, pady=10)
         self.kp_y_var = tk.DoubleVar(value=self.Kp_y)
-        ttk.Scale(self.root, from_=0, to=100, variable=self.kp_y_var, orient=tk.HORIZONTAL, length=550).pack()
-        ttk.Label(self.root, text="Ki Y").pack()
         self.ki_y_var = tk.DoubleVar(value=self.Ki_y)
-        ttk.Scale(self.root, from_=0, to=50, variable=self.ki_y_var, orient=tk.HORIZONTAL, length=550).pack()
-        ttk.Label(self.root, text="Kd Y").pack()
         self.kd_y_var = tk.DoubleVar(value=self.Kd_y)
-        ttk.Scale(self.root, from_=0, to=50, variable=self.kd_y_var, orient=tk.HORIZONTAL, length=550).pack()
+        create_param_control(main_frame, "Kp Y", self.kp_y_var, 0, 10, 6)
+        create_param_control(main_frame, "Ki Y", self.ki_y_var, 0, 10, 7)
+        create_param_control(main_frame, "Kd Y", self.kd_y_var, 0, 10, 8)
 
-        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill='x', pady=6)
+        ttk.Separator(main_frame, orient=tk.HORIZONTAL).grid(row=9, column=0, sticky='ew', pady=10)
 
-        ttk.Label(self.root, text="Mapping scale (deg per meter)").pack()
+        # Mapping scale control
+        ttk.Label(main_frame, text="Platform Control", font=('Arial', 10, 'bold')).grid(row=10, column=0, pady=10)
         self.mapping_var = tk.DoubleVar(value=self.mapping_scale)
-        ttk.Scale(self.root, from_=50, to=2000, variable=self.mapping_var, orient=tk.HORIZONTAL, length=550).pack()
+        create_param_control(main_frame, "Map Scale", self.mapping_var, 50, 2000, 11)
 
-        btn_frame = ttk.Frame(self.root)
-        btn_frame.pack(pady=8)
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.grid(row=12, column=0, pady=20)
+        
         ttk.Button(btn_frame, text="Reset Integrals", command=self.reset_integrals).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Plot Results", command=self.plot_results).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Stop", command=self.stop).pack(side=tk.LEFT, padx=6)
 
+        # Current Values Display
+        self.values_label = ttk.Label(main_frame, text="", justify=tk.LEFT)
+        self.values_label.grid(row=13, column=0, pady=10)
+
         self.root.after(100, self.gui_update)
+    # # ---------------- GUI and plotting ----------------
+    # def create_gui(self):
+    #     self.root = tk.Tk()
+    #     self.root.title("Stewart Platform PID")
+    #     self.root.geometry("640x620")
+
+    #     # X axis (horizontal) gains
+    #     ttk.Label(self.root, text="Kp X").pack()
+    #     self.kp_x_var = tk.DoubleVar(value=self.Kp_x)
+    #     ttk.Scale(self.root, from_=0, to=100, variable=self.kp_x_var, orient=tk.HORIZONTAL, length=550).pack()
+    #     ttk.Label(self.root, text="Ki X").pack()
+    #     self.ki_x_var = tk.DoubleVar(value=self.Ki_x)
+    #     ttk.Scale(self.root, from_=0, to=50, variable=self.ki_x_var, orient=tk.HORIZONTAL, length=550).pack()
+    #     ttk.Label(self.root, text="Kd X").pack()
+    #     self.kd_x_var = tk.DoubleVar(value=self.Kd_x)
+    #     ttk.Scale(self.root, from_=0, to=50, variable=self.kd_x_var, orient=tk.HORIZONTAL, length=550).pack()
+
+    #     ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill='x', pady=6)
+
+    #     # Y axis gains
+    #     ttk.Label(self.root, text="Kp Y").pack()
+    #     self.kp_y_var = tk.DoubleVar(value=self.Kp_y)
+    #     ttk.Scale(self.root, from_=0, to=100, variable=self.kp_y_var, orient=tk.HORIZONTAL, length=550).pack()
+    #     ttk.Label(self.root, text="Ki Y").pack()
+    #     self.ki_y_var = tk.DoubleVar(value=self.Ki_y)
+    #     ttk.Scale(self.root, from_=0, to=50, variable=self.ki_y_var, orient=tk.HORIZONTAL, length=550).pack()
+    #     ttk.Label(self.root, text="Kd Y").pack()
+    #     self.kd_y_var = tk.DoubleVar(value=self.Kd_y)
+    #     ttk.Scale(self.root, from_=0, to=50, variable=self.kd_y_var, orient=tk.HORIZONTAL, length=550).pack()
+
+    #     ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill='x', pady=6)
+
+    #     ttk.Label(self.root, text="Mapping scale (deg per meter)").pack()
+    #     self.mapping_var = tk.DoubleVar(value=self.mapping_scale)
+    #     ttk.Scale(self.root, from_=50, to=2000, variable=self.mapping_var, orient=tk.HORIZONTAL, length=550).pack()
+
+    #     btn_frame = ttk.Frame(self.root)
+    #     btn_frame.pack(pady=8)
+    #     ttk.Button(btn_frame, text="Reset Integrals", command=self.reset_integrals).pack(side=tk.LEFT, padx=6)
+    #     ttk.Button(btn_frame, text="Plot Results", command=self.plot_results).pack(side=tk.LEFT, padx=6)
+    #     ttk.Button(btn_frame, text="Stop", command=self.stop).pack(side=tk.LEFT, padx=6)
+
+    #     self.root.after(100, self.gui_update)
 
     def gui_update(self):
         if self.running:

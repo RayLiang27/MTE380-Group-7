@@ -33,7 +33,7 @@ class SimpleCalibratorSP:
 
         # Arduino serial setup
         self.arduino_port = "COM5" #"/dev/cu.usbmodem1301"  # Update as needed (COM3 on Windows)
-        self.baud_rate = 9600
+        self.baud_rate = 115200
         self.arduino = None
 
     # ---------------- SERVO CALIBRATION FIRST ---------------- #
@@ -92,7 +92,7 @@ class SimpleCalibratorSP:
             cv2.putText(frame, f"Motor 2: {a2}°", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
             cv2.putText(frame, f"Motor 3: {a3}°", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
             cv2.imshow("Servo Calibration", frame)
-
+            # self.send_servo_angles(angles)
             key = cv2.waitKey(50) & 0xFF
             if key == 27:  # ESC
                 print("[INFO] Calibration aborted.")
@@ -100,7 +100,7 @@ class SimpleCalibratorSP:
                 return
             elif key == 32:  # SPACE
                 print(f"[INFO] Final neutral angles: {angles}")
-                global NEUTRAL_ANGLES
+                # global NEUTRAL_ANGLES
                 NEUTRAL_ANGLES[:] = angles
                 break
 
