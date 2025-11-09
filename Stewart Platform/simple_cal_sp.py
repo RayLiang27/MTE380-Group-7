@@ -58,16 +58,57 @@ class SimpleCalibratorSP:
         print(f"[SERVO] Sent: {cmd.strip()}")
 
     def calibrate_servos(self):
-        """Step 1: Level the platform."""
+        """Step 1: Level the platform using sliders for each motor."""
         self.connect_arduino()
         print("\n=== SERVO CALIBRATION ===")
-        print("Moving all servos to neutral position.")
-        self.send_servo_angles(NEUTRAL_ANGLES)
-        print("Setting servos to neutral position...")
-        time.sleep(2)  # Give servos time to move
+        print("Use sliders to adjust each motor's neutral angle (0–70°).")
+        print("Press SPACE when satisfied to continue calibration.")
+
+        # Create window with sliders
+        cv2.namedWindow("Servo Calibration")
+
+        # Create trackbars for each motor
+        cv2.createTrackbar("Motor 1", "Servo Calibration", NEUTRAL_ANGLES[0], 70, lambda x: None)
+        cv2.createTrackbar("Motor 2", "Servo Calibration", NEUTRAL_ANGLES[1], 70, lambda x: None)
+        cv2.createTrackbar("Motor 3", "Servo Calibration", NEUTRAL_ANGLES[2], 70, lambda x: None)
+
+        last_angles = [None, None, None]
+
+        while True:
+            # Read slider values
+            a1 = cv2.getTrackbarPos("Motor 1", "Servo Calibration")
+            a2 = cv2.getTrackbarPos("Motor 2", "Servo Calibration")
+            a3 = cv2.getTrackbarPos("Motor 3", "Servo Calibration")
+            angles = [a1, a2, a3]
+
+            # Only send command if angles changed
+            if angles != last_angles:
+                self.send_servo_angles(angles)
+                last_angles = angles.copy()
+
+            # Show live angle values on a black background
+            frame = np.zeros((200, 400, 3), dtype=np.uint8)
+            cv2.putText(frame, f"Motor 1: {a1}°", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+            cv2.putText(frame, f"Motor 2: {a2}°", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+            cv2.putText(frame, f"Motor 3: {a3}°", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+            cv2.imshow("Servo Calibration", frame)
+
+            key = cv2.waitKey(50) & 0xFF
+            if key == 27:  # ESC
+                print("[INFO] Calibration aborted.")
+                cv2.destroyWindow("Servo Calibration")
+                return
+            elif key == 32:  # SPACE
+                print(f"[INFO] Final neutral angles: {angles}")
+                global NEUTRAL_ANGLES
+                NEUTRAL_ANGLES[:] = angles
+                break
+
+        cv2.destroyWindow("Servo Calibration")
         self.save_servo_calibration()
         print("[INFO] Servo calibration complete.")
         self.phase = "color"
+
 
     def save_servo_calibration(self):
         """Save servo neutral angles (degrees only)."""
