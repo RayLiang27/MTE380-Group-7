@@ -76,17 +76,20 @@ class StewartPIDController:
 
         # PID defaults (two independent controllers)
         self.Kp_x = 2.5
-        self.Ki_x = 0.0
-        self.Kd_x = 0.9
+        self.Ki_x = 0.5
+        self.Kd_x = 1.8
         self.Kp_y = 2.5
-        self.Ki_y = 0.0
-        self.Kd_y = 0.9
+        self.Ki_y = 1.0
+        self.Kd_y = 1.8
 
         # Internal PID state
         self.integral_x = 0.0
         self.integral_y = 0.0
         self.prev_error_x = 0.0
         self.prev_error_y = 0.0
+
+        self.integral_deadband_m = float(self.config.get("integral_deadband_m", 0.003))
+        self.integral_slowband_m = float(self.config.get("integral_deadband_m", 0.005))
 
         # Mapping scale: how many degrees of servo per meter of ball displacement
         self.mapping_scale = float(self.config.get('mapping_scale_deg_per_m', 600.0))
@@ -109,6 +112,13 @@ class StewartPIDController:
 
         # setpoint: keep ball at the calibrated origin => error (0,0)
         self.setpoint_px = self.origin_px.copy()
+        
+    def set_setpoint(self, x_px, y_px):
+        """Set desired ball position in pixels."""
+        if x_px < 0 or y_px < 0 or x_px >= self.FRAME_W or y_px >= self.FRAME_H:
+            raise ValueError("Setpoint out of frame bounds")
+        
+        self.setpoint_px = np.array([x_px, y_px], dtype=np.float32)
 
     # ---------------- hardware -----------------
     def connect_arduino(self):
@@ -167,7 +177,7 @@ class StewartPIDController:
         cv2.circle(vis, (int(x), int(y)), int(radius), (0, 255, 255), 2)
         cv2.circle(vis, (int(x), int(y)), 3, (0, 0, 255), -1)
         # draw origin
-        ox, oy = int(self.origin_px[0]), int(self.origin_px[1])
+        ox, oy = int(self.setpoint_px[0]), int(self.setpoint_px[1])
         cv2.circle(vis, (ox, oy), 4, (255, 0, 0), -1)
         cv2.line(vis, (ox, oy), (int(x), int(y)), (255, 0, 0), 1)
         return True, center, vis
@@ -175,10 +185,21 @@ class StewartPIDController:
     # ---------------- PID math ----------------
     def update_pid(self, error, prev_error, integral, Kp, Ki, Kd, dt):
         """Generic PID update returning (output, new_integral, new_prev_error)."""
-        integral_new = integral + error * dt
+        if abs(error) > self.integral_slowband_m:
+            integral_new = integral + error * dt
+        elif abs(error) > self.integral_deadband_m:
+            # Inside the deadband: zero out the integral so it doesn't keep pushing
+            integral_new = integral*0.97
+        else:
+            integral_new = 0.0
         derivative = 0.0 if dt <= 0 else (error - prev_error) / dt
-        out = Kp * error + Ki * integral_new + Kd * derivative
-        return out, integral_new, error
+        clipped_integral = np.clip(integral_new, -0.4, 0.4)
+        # if error < self.integral_deadband_m and error > -self.integral_deadband_m:
+        #     out = 0.0
+        # else:
+        out = Kp * error + Ki * clipped_integral + Kd * derivative
+        print(f"[PID] error: {error:.6f}, integral: {clipped_integral:.6f}, derivative: {derivative:.6f}, output: {out:.6f}")
+        return out, clipped_integral, error
 
     # ---------------- camera & control threads ----------------
     def camera_thread(self):
@@ -190,6 +211,8 @@ class StewartPIDController:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.FRAME_W)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.FRAME_H)
         cap.set(cv2.CAP_PROP_FPS, 60)  # hint only
+        cv2.namedWindow("SP Ball Tracking", cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback("SP Ball Tracking", self._on_mouse_click)
         
         if not cap.isOpened():
             print("[CAM] Could not open camera")
@@ -220,6 +243,17 @@ class StewartPIDController:
 
         cap.release()
         cv2.destroyAllWindows()
+
+    def _on_mouse_click(self, event, x, y, flags, param):
+        """Left-click on video to set setpoint."""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.setpoint_px = np.array([float(x), float(y)], dtype=np.float32)
+            print(f"[CAM] Setpoint updated to: ({int(x)}, {int(y)})")
+
+    def reset_setpoint_to_center(self):
+        """Reset setpoint back to platform center."""
+        self.setpoint_px = self.origin_px.copy()
+        print(f"[CTRL] Setpoint reset to center: ({int(self.origin_px[0])}, {int(self.origin_px[1])})")
 
     def control_thread(self):
         if not self.connect_arduino():
@@ -286,7 +320,7 @@ class StewartPIDController:
                 S = np.array([0.0, 0.0, platform_h])
                 res = inverse_kinematics_from_orientation(nrm, S, elbow_up=True, verbose=False)
                 legs = res['legs']
-                print(legs)
+                # print(legs)
                 if None in legs:
                     legs = self.neutral_angles
 
@@ -345,7 +379,7 @@ class StewartPIDController:
                 # self.setpoint_y_log.append(self.setpoint_px[1])
                 # self.servo_log.append(angles)
 
-                print(f"qsize: {self.position_queue.qsize()}")
+                # print(f"qsize: {self.position_queue.qsize()}")
                 print(f"t={t:.2f}s center={center.astype(int)} err_px={error_px.astype(int)} PID_out=[{out_x} {out_y}] servo={list(map(int,angles))}")
 
             except queue.Empty:
@@ -442,6 +476,7 @@ class StewartPIDController:
         ttk.Button(btn_frame, text="Reset Integrals", command=self.reset_integrals).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Plot Results", command=self.plot_results).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Stop", command=self.stop).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="Reset to Center", command=self.reset_setpoint_to_center).pack(side=tk.LEFT, padx=6)
 
         # Current Values Display
         self.values_label = ttk.Label(main_frame, text="", justify=tk.LEFT)
