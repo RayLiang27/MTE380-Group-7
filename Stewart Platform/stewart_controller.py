@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from threading import Thread
 import queue
 import os
+from collections import deque
 
 try:
     cv2.setNumThreads(1)
@@ -65,9 +66,11 @@ class StewartPIDController:
         servos = self.config.get('servo_calibration', {}).get('neutral_angles_deg')
         if servos and len(servos) >= 3:
             self.neutral_angles = [int(s) for s in servos[:3]]
+            self.neutral_angles = [39,53,50]
         else:
             # sensible reasonable default
             self.neutral_angles = [50, 50, 50]
+            self.neutral_angles = [39,53,50]
 
         # self.arduino_port = self.config.get('arduino_port', "/dev/cu.usbmodem1301")
         self.arduino_port = self.config.get('arduino_port', "COM5")
@@ -76,19 +79,21 @@ class StewartPIDController:
 
         # PID defaults (two independent controllers)
         self.Kp_x = 2.5
-        self.Ki_x = 0.5
+        self.Ki_x = 0.2
         self.Kd_x = 1.8
         self.Kp_y = 2.5
-        self.Ki_y = 1.0
+        self.Ki_y = 0.2
         self.Kd_y = 1.8
 
         # Internal PID state
         self.integral_x = 0.0
         self.integral_y = 0.0
+        self.derivative_x = 0.0
+        self.derivative_y = 0.0
         self.prev_error_x = 0.0
         self.prev_error_y = 0.0
 
-        self.integral_deadband_m = float(self.config.get("integral_deadband_m", 0.003))
+        self.integral_deadband_m = float(self.config.get("integral_deadband_m", 0.005))
         self.integral_slowband_m = float(self.config.get("integral_deadband_m", 0.005))
 
         # Mapping scale: how many degrees of servo per meter of ball displacement
@@ -101,6 +106,20 @@ class StewartPIDController:
         self.setpoint_x_log = []
         self.setpoint_y_log = []
         self.servo_log = []
+
+        self.max_points = 1000
+
+        # PID diagnostic logs using rolling buffers
+        self.time_log = deque(maxlen=self.max_points)
+
+        self.err_x_log = deque(maxlen=self.max_points)
+        self.err_y_log = deque(maxlen=self.max_points)
+
+        self.int_x_log = deque(maxlen=self.max_points)
+        self.int_y_log = deque(maxlen=self.max_points)
+
+        self.der_x_log = deque(maxlen=self.max_points)
+        self.der_y_log = deque(maxlen=self.max_points)
 
         # runtime flags and queue
         self.running = False
@@ -183,23 +202,59 @@ class StewartPIDController:
         return True, center, vis
 
     # ---------------- PID math ----------------
+
     def update_pid(self, error, prev_error, integral, Kp, Ki, Kd, dt):
-        """Generic PID update returning (output, new_integral, new_prev_error)."""
-        if abs(error) > self.integral_slowband_m:
+        """Generic PID update returning (output, new_integral, new_prev_error, derivative).
+
+        Integral logic:
+        - If |error| > deadband: integrate error normally (with clamp).
+        - If |error| <= deadband: bleed the integral toward zero (leaky integrator).
+        """
+        if dt <= 0:
+            dt = 1e-6
+
+        # --- Integral update ---
+        if abs(error) > self.integral_deadband_m:
+            # Normal integration when away from the setpoint
             integral_new = integral + error * dt
-        elif abs(error) > self.integral_deadband_m:
-            # Inside the deadband: zero out the integral so it doesn't keep pushing
-            integral_new = integral*0.97
         else:
-            integral_new = 0.0
-        derivative = 0.0 if dt <= 0 else (error - prev_error) / dt
-        clipped_integral = np.clip(integral_new, -0.4, 0.4)
-        # if error < self.integral_deadband_m and error > -self.integral_deadband_m:
-        #     out = 0.0
-        # else:
-        out = Kp * error + Ki * clipped_integral + Kd * derivative
-        print(f"[PID] error: {error:.6f}, integral: {clipped_integral:.6f}, derivative: {derivative:.6f}, output: {out:.6f}")
-        return out, clipped_integral, error
+            # Inside deadband: exponential decay of existing integral
+            tau = 1.0
+            decay = np.exp(-dt / tau)
+            integral_new = integral * decay
+
+        # Clamp integral to avoid windup
+        integral_new = float(np.clip(integral_new,
+                                         -0.6,
+                                         0.6))
+
+        # --- Derivative & output ---
+        derivative = (error - prev_error) / dt
+        out = Kp * error + Ki * integral_new + Kd * derivative
+        print(f"[PID] error: {error:.6f}, integral: {integral_new:.6f}, derivative: {derivative:.6f}, output: {out:.6f}")
+
+        return out, integral_new, error, derivative
+    
+    # def update_pid(self, error, prev_error, integral, Kp, Ki, Kd, dt):
+    #     """Generic PID update returning (output, new_integral, new_prev_error)."""
+    #     # if abs(error) > self.integral_slowband_m:
+    #     integral_new = integral + error * dt
+    #     # if abs(error) < self.integral_deadband_m:
+    #     #     # Inside the deadband: zero out the integral so it doesn't keep pushing
+    #     #     integral_new = integral*0.97
+    #     # else:
+    #     #     integral_new = 0.0
+    #     derivative = 0.0 if dt <= 0 else (error - prev_error) / dt
+
+    #     if abs(derivative) < 1e-5 and abs(error) < self.integral_deadband_m:
+    #         clipped_integral = 0.0
+    #     # if error < self.integral_deadband_m and error > -self.integral_deadband_m:
+    #     #     out = 0.0
+    #     else:
+    #         clipped_integral = np.clip(integral_new, -0.6, 0.6)
+    #     out = Kp * error + Ki * clipped_integral + Kd * derivative
+    #     print(f"[PID] error: {error:.6f}, integral: {clipped_integral:.6f}, derivative: {derivative:.6f}, output: {out:.6f}")
+    #     return out, clipped_integral, error
 
     # ---------------- camera & control threads ----------------
     def camera_thread(self):
@@ -279,11 +334,11 @@ class StewartPIDController:
                 error_y_m = error_m[1]
 
                 # PID X (horizontal) and Y (vertical)
-                out_x, self.integral_x, self.prev_error_x = self.update_pid(
+                out_x, self.integral_x, self.prev_error_x, self.derivative_x= self.update_pid(
                     error_x_m, self.prev_error_x, self.integral_x,
                     self.Kp_x, self.Ki_x, self.Kd_x, dt)
 
-                out_y, self.integral_y, self.prev_error_y = self.update_pid(
+                out_y, self.integral_y, self.prev_error_y, self.derivative_y = self.update_pid(
                     error_y_m, self.prev_error_y, self.integral_y,
                     self.Kp_y, self.Ki_y, self.Kd_y, dt)
 
@@ -372,6 +427,14 @@ class StewartPIDController:
 
                 # logging     bad - a human
                 t = time.time() - self.start_time
+                self.time_log.append(t)
+                self.err_x_log.append(error_x_m)
+                self.err_y_log.append(error_y_m)
+                self.int_x_log.append(self.integral_x)
+                self.int_y_log.append(self.integral_y)
+                self.der_x_log.append(self.derivative_x)
+                self.der_y_log.append(self.derivative_y)
+
                 # self.time_log.append(t)
                 # self.pos_x_log.append(center[0])
                 # self.pos_y_log.append(center[1])
@@ -395,6 +458,72 @@ class StewartPIDController:
                 self.arduino.close()
             except Exception:
                 pass
+    # ---------------- live PID plotting ----------------
+    def init_live_plot(self):
+        """Initialize live matplotlib figure for error / integral / derivative."""
+        plt.ion()
+        self.fig_pid, self.ax_pid = plt.subplots(3, 1, figsize=(7, 8), sharex=True)
+        self.fig_pid.suptitle("PID Diagnostics (X & Y)")
+
+        # Error subplot
+        self.err_x_line, = self.ax_pid[0].plot([], [], label="err_x [m]")
+        self.err_y_line, = self.ax_pid[0].plot([], [], label="err_y [m]")
+        self.ax_pid[0].set_ylabel("Error")
+        self.ax_pid[0].legend()
+        self.ax_pid[0].grid(True)
+
+        # Integral subplot
+        self.int_x_line, = self.ax_pid[1].plot([], [], label="int_x")
+        self.int_y_line, = self.ax_pid[1].plot([], [], label="int_y")
+        self.ax_pid[1].set_ylabel("Integral")
+        self.ax_pid[1].legend()
+        self.ax_pid[1].grid(True)
+
+        # Derivative subplot
+        self.der_x_line, = self.ax_pid[2].plot([], [], label="der_x [m/s]")
+        self.der_y_line, = self.ax_pid[2].plot([], [], label="der_y [m/s]")
+        self.ax_pid[2].set_ylabel("Derivative")
+        self.ax_pid[2].set_xlabel("Time [s]")
+        self.ax_pid[2].legend()
+        self.ax_pid[2].grid(True)
+
+        self.fig_pid.tight_layout()
+        self.fig_pid.canvas.draw()
+        self.fig_pid.show()
+
+    def update_live_plot(self):
+        """Update live PID plots with latest logs."""
+        if not self.time_log:
+            return
+
+        t  = list(self.time_log)
+
+        err_x = list(self.err_x_log)
+        err_y = list(self.err_y_log)
+
+        int_x = list(self.int_x_log)
+        int_y = list(self.int_y_log)
+
+        der_x = list(self.der_x_log)
+        der_y = list(self.der_y_log)
+
+        # Update line data
+        self.err_x_line.set_data(t, err_x)
+        self.err_y_line.set_data(t, err_y)
+
+        self.int_x_line.set_data(t, int_x)
+        self.int_y_line.set_data(t, int_y)
+
+        self.der_x_line.set_data(t, der_x)
+        self.der_y_line.set_data(t, der_y)
+
+        # Rescale axes
+        for ax in self.ax_pid:
+            ax.relim()
+            ax.autoscale_view()
+
+        self.fig_pid.canvas.draw_idle()
+        self.fig_pid.canvas.flush_events()
 
     def create_gui(self):
         self.root = tk.Tk()
@@ -536,6 +665,7 @@ class StewartPIDController:
             self.Ki_y = self.ki_y_var.get()
             self.Kd_y = self.kd_y_var.get()
             self.mapping_scale = self.mapping_var.get()
+            self.update_live_plot()
             self.root.after(100, self.gui_update)
 
     def reset_integrals(self):
@@ -580,6 +710,8 @@ class StewartPIDController:
         ctrl_thread = Thread(target=self.control_thread, daemon=True)
         cam_thread.start()
         ctrl_thread.start()
+
+        self.init_live_plot()
 
         # GUI runs in main thread
         self.create_gui()
