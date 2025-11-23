@@ -162,7 +162,7 @@ class StewartPIDController:
         If Arduino not connected, prints message (simulation mode).
         """
         # clip and convert
-        safe = [float(np.clip(a, 0, 70)) for a in angles] # TODO: find actual degree limits
+        safe = [int(np.clip(a, 0, 70)) for a in angles] # TODO: find actual degree limits
         if self.arduino:
             cmd = f"{safe[0]},{safe[1]},{safe[2]}\n"
             try:
