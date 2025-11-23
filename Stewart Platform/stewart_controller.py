@@ -130,6 +130,12 @@ class StewartPIDController:
 
         # setpoint: keep ball at the calibrated origin => error (0,0)
         self.setpoint_px = self.origin_px.copy()
+        # Test mode parameters
+        self.testing = False
+        self.test_pre_delay_s = float(self.config.get('test_pre_delay_s', 1.0))
+        self.test_duration_s = float(self.config.get('test_duration_s', 15.0))
+        self.test_disp_m = float(self.config.get('test_disp_m', 0.01))
+        self._test_thread = None
         
     def set_setpoint(self, x_px, y_px):
         """Set desired ball position in pixels."""
@@ -649,6 +655,31 @@ class StewartPIDController:
         self.mapping_var = tk.DoubleVar(value=self.mapping_scale)
         create_param_control(main_frame, "Map Scale", self.mapping_var, 50, 2000, 11)
 
+        # --- Test setpoint controls (choose before pressing Test) ---
+        test_frame = ttk.Frame(main_frame)
+        test_frame.grid(row=11, column=0, pady=6, sticky='ew')
+        ttk.Label(test_frame, text="Test Setpoint", font=('Arial', 10, 'bold')).grid(row=0, column=0, sticky='w')
+
+        # Mode: relative (meters in +Y) or absolute pixels
+        self.test_mode_var = tk.StringVar(value='relative')
+        rb_rel = ttk.Radiobutton(test_frame, text="Relative +Y (m)", variable=self.test_mode_var, value='relative')
+        rb_abs = ttk.Radiobutton(test_frame, text="Absolute (px)", variable=self.test_mode_var, value='absolute')
+        rb_rel.grid(row=1, column=0, sticky='w', pady=2)
+        rb_abs.grid(row=1, column=1, sticky='w', pady=2)
+
+        # Relative displacement entry (meters)
+        self.test_disp_var = tk.DoubleVar(value=self.test_disp_m)
+        ttk.Label(test_frame, text="Disp (m):").grid(row=2, column=0, sticky='e')
+        ttk.Entry(test_frame, textvariable=self.test_disp_var, width=10, justify='right').grid(row=2, column=1, sticky='w', padx=4)
+
+        # Absolute pixel setpoint entries (x,y)
+        self.test_set_x_var = tk.DoubleVar(value=float(self.origin_px[0]))
+        self.test_set_y_var = tk.DoubleVar(value=float(self.origin_px[1]))
+        ttk.Label(test_frame, text="X px:").grid(row=3, column=0, sticky='e')
+        ttk.Entry(test_frame, textvariable=self.test_set_x_var, width=10, justify='right').grid(row=3, column=1, sticky='w', padx=4)
+        ttk.Label(test_frame, text="Y px:").grid(row=4, column=0, sticky='e')
+        ttk.Entry(test_frame, textvariable=self.test_set_y_var, width=10, justify='right').grid(row=4, column=1, sticky='w', padx=4)
+
         # Buttons
         btn_frame = ttk.Frame(main_frame)
         btn_frame.grid(row=12, column=0, pady=20)
@@ -657,6 +688,7 @@ class StewartPIDController:
         ttk.Button(btn_frame, text="Plot Results", command=self.plot_results).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Save CSV", command=self.save_csv).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Stop", command=self.stop).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="Test", command=self.start_test).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Reset to Center", command=self.reset_setpoint_to_center).pack(side=tk.LEFT, padx=6)
 
         # Current Values Display
@@ -719,6 +751,131 @@ class StewartPIDController:
             self.mapping_scale = self.mapping_var.get()
             self.update_live_plot()
             self.root.after(100, self.gui_update)
+
+    # ---------------- test mode ----------------
+    def start_test(self):
+        """Start the automated test sequence (non-blocking).
+
+        Behavior:
+        - Record for `test_pre_delay_s` seconds at current setpoint (assume balanced center).
+        - After pre-delay, command a new setpoint shifted by +Y (down) by `test_disp_m` meters.
+        - Record for `test_duration_s` seconds, then save CSV and restore setpoint to origin.
+        """
+        if self.testing:
+            print("[TEST] Test already running")
+            return
+        # ensure control is running
+        if not self.running:
+            print("[TEST] Controller not running; start controller before testing")
+            return
+
+        # Launch test thread
+        self.testing = True
+        self._test_thread = Thread(target=self._run_test, daemon=True)
+        self._test_thread.start()
+
+    def _run_test(self):
+        try:
+            print(f"[TEST] Starting test: pre-delay {self.test_pre_delay_s}s, run {self.test_duration_s}s, disp {self.test_disp_m} m")
+            # Save original experiment tag and set a test tag
+            old_tag = getattr(self, 'experiment_tag', 'servo')
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            self.experiment_tag = f"test_{ts}"
+
+            # Ensure logs are empty for a clean run
+            self.time_log.clear()
+            self.pos_x_log.clear()
+            self.pos_y_log.clear()
+            self.setpoint_x_log.clear()
+            self.setpoint_y_log.clear()
+            self.servo_log.clear()
+
+            # Also clear rolling PID buffers
+            try:
+                self.time_log_window.clear()
+                self.err_x_log.clear()
+                self.err_y_log.clear()
+                self.int_x_log.clear()
+                self.int_y_log.clear()
+                self.der_x_log.clear()
+                self.der_y_log.clear()
+            except Exception:
+                pass
+
+            # Start recording immediately for pre-delay
+            test_start = time.time()
+            pre_end = test_start + float(self.test_pre_delay_s)
+            run_end = pre_end + float(self.test_duration_s)
+
+            # Keep original setpoint
+            orig_setpoint = self.setpoint_px.copy()
+
+            # Wait for pre-delay while control loop logs data
+            while time.time() < pre_end and self.running:
+                time.sleep(0.05)
+
+            # Determine new setpoint according to GUI selections (safe fallback to stored values)
+            mode = 'relative'
+            try:
+                mode = self.test_mode_var.get()
+            except Exception:
+                mode = 'relative'
+
+            if mode == 'absolute':
+                try:
+                    tx = float(self.test_set_x_var.get())
+                    ty = float(self.test_set_y_var.get())
+                except Exception:
+                    tx, ty = float(self.origin_px[0]), float(self.origin_px[1])
+                # Use set_setpoint to validate/clamp
+                try:
+                    self.set_setpoint(tx, ty)
+                except Exception:
+                    # fallback to direct assign
+                    self.setpoint_px = np.array([float(np.clip(tx, 0, self.FRAME_W - 1)),
+                                                  float(np.clip(ty, 0, self.FRAME_H - 1))], dtype=np.float32)
+                print(f"[TEST] Commanded absolute new setpoint (px): {self.setpoint_px}")
+            else:
+                try:
+                    disp_m = float(self.test_disp_var.get())
+                except Exception:
+                    disp_m = float(self.test_disp_m)
+
+                # Convert meters -> pixels (pixel_to_meter is meters per pixel)
+                if self.pixel_to_meter and self.pixel_to_meter != 0:
+                    dy_px = disp_m / float(self.pixel_to_meter)
+                else:
+                    dy_px = 0.0
+
+                new_setpoint = orig_setpoint.copy()
+                new_setpoint[1] = float(orig_setpoint[1]) + dy_px
+                # Use set_setpoint to validate/clamp
+                try:
+                    self.set_setpoint(new_setpoint[0], new_setpoint[1])
+                except Exception:
+                    self.setpoint_px = np.array([float(np.clip(new_setpoint[0], 0, self.FRAME_W - 1)),
+                                                  float(np.clip(new_setpoint[1], 0, self.FRAME_H - 1))], dtype=np.float32)
+                print(f"[TEST] Commanded relative new setpoint (px): {self.setpoint_px}")
+
+            # Wait while recording run_duration
+            while time.time() < run_end and self.running:
+                time.sleep(0.05)
+
+            # Assume balanced; save data to CSV
+            print("[TEST] Test complete — saving CSV and restoring setpoint")
+            self.save_csv()
+
+            # Restore setpoint to platform center (origin_px) and experiment tag
+            try:
+                self.setpoint_px = self.origin_px.copy()
+            except Exception:
+                self.setpoint_px = orig_setpoint
+            self.experiment_tag = old_tag
+            print(f"[TEST] Setpoint restored to origin: {self.setpoint_px}")
+
+        finally:
+            self.testing = False
+            self._test_thread = None
 
     def reset_integrals(self):
         self.integral_x = 0.0
