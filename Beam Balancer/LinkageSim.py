@@ -372,9 +372,9 @@ def print_top(results):
 
 if __name__ == "__main__":
     # Geometry parameters (mm)
-    w = 40.0   # motor offset from center (x)
-    h = 150.0   # fulcrum height (y)
-    l  = 60.0  # half beam length
+    w = 30.0   # motor offset from center (x)
+    h = 80.0   # fulcrum height (y)
+    l  = 150  # half beam length
     theta = 5.0  # +/- beam angle (deg)
 
     # Quick pass (coarse grid). Refine ranges around winners after first run.
@@ -383,8 +383,8 @@ if __name__ == "__main__":
 
     top, allres = search_lengths(
         w, h, l, 
-        L1_vals=L1_vals,
-        L2_vals=L2_vals,
+        L1_vals=(80,),
+        L2_vals=(90,),
         tie_offsets=(None,),          
         elbows=(False,),
         top_k=10,

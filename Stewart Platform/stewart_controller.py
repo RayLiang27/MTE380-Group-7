@@ -66,11 +66,11 @@ class StewartPIDController:
         servos = self.config.get('servo_calibration', {}).get('neutral_angles_deg')
         if servos and len(servos) >= 3:
             self.neutral_angles = [int(s) for s in servos[:3]]
-            self.neutral_angles = [39,53,50]
+            self.neutral_angles = [39,50,50]
         else:
             # sensible reasonable default
             self.neutral_angles = [50, 50, 50]
-            self.neutral_angles = [39,53,50]
+            self.neutral_angles = [39,50,50]
 
         # self.arduino_port = self.config.get('arduino_port', "/dev/cu.usbmodem1301")
         self.arduino_port = self.config.get('arduino_port', "COM5")
@@ -93,13 +93,15 @@ class StewartPIDController:
         self.prev_error_x = 0.0
         self.prev_error_y = 0.0
 
-        self.integral_deadband_m = float(self.config.get("integral_deadband_m", 0.005))
+        self.integral_deadband_m = float(self.config.get("integral_deadband_m", 0.007))
         self.integral_slowband_m = float(self.config.get("integral_deadband_m", 0.005))
 
         # Mapping scale: how many degrees of servo per meter of ball displacement
         self.mapping_scale = float(self.config.get('mapping_scale_deg_per_m', 600.0))
 
         # Logs
+        self.experiment_tag = self.config.get('experiment_tag', 'servo')
+
         self.time_log = []
         self.pos_x_log = []
         self.pos_y_log = []
@@ -110,14 +112,11 @@ class StewartPIDController:
         self.max_points = 1000
 
         # PID diagnostic logs using rolling buffers
-        self.time_log = deque(maxlen=self.max_points)
-
+        self.time_log_window = deque(maxlen=self.max_points)
         self.err_x_log = deque(maxlen=self.max_points)
         self.err_y_log = deque(maxlen=self.max_points)
-
         self.int_x_log = deque(maxlen=self.max_points)
         self.int_y_log = deque(maxlen=self.max_points)
-
         self.der_x_log = deque(maxlen=self.max_points)
         self.der_y_log = deque(maxlen=self.max_points)
 
@@ -157,7 +156,7 @@ class StewartPIDController:
         If Arduino not connected, prints message (simulation mode).
         """
         # clip and convert
-        safe = [int(np.clip(a, 0, 70)) for a in angles] # TODO: find actual degree limits
+        safe = [float(np.clip(a, 0, 70)) for a in angles] # TODO: find actual degree limits
         if self.arduino:
             cmd = f"{safe[0]},{safe[1]},{safe[2]}\n"
             try:
@@ -219,7 +218,7 @@ class StewartPIDController:
             integral_new = integral + error * dt
         else:
             # Inside deadband: exponential decay of existing integral
-            tau = 1.0
+            tau = 1.67
             decay = np.exp(-dt / tau)
             integral_new = integral * decay
 
@@ -428,6 +427,16 @@ class StewartPIDController:
                 # logging     bad - a human
                 t = time.time() - self.start_time
                 self.time_log.append(t)
+                self.pos_x_log.append(float(center[0]))
+                self.pos_y_log.append(float(center[1]))
+                self.setpoint_x_log.append(float(self.setpoint_px[0]))
+                self.setpoint_y_log.append(float(self.setpoint_px[1]))
+                # store a copy so we don't accidentally mutate later
+                self.servo_log.append([float(angles[0]),
+                                       float(angles[1]),
+                                       float(angles[2])])
+
+                self.time_log_window.append(t)
                 self.err_x_log.append(error_x_m)
                 self.err_y_log.append(error_y_m)
                 self.int_x_log.append(self.integral_x)
@@ -493,10 +502,10 @@ class StewartPIDController:
 
     def update_live_plot(self):
         """Update live PID plots with latest logs."""
-        if not self.time_log:
+        if not self.time_log_window:
             return
 
-        t  = list(self.time_log)
+        t  = list(self.time_log_window)
 
         err_x = list(self.err_x_log)
         err_y = list(self.err_y_log)
@@ -524,6 +533,48 @@ class StewartPIDController:
 
         self.fig_pid.canvas.draw_idle()
         self.fig_pid.canvas.flush_events()
+
+    def save_csv(self):
+        """Save full-run logs to a timestamped CSV for analysis."""
+        if not self.time_log:
+            print("[SAVE] no data to save")
+            return
+
+        import numpy as np
+
+        # Make sure lengths stay consistent
+        n = len(self.time_log)
+        if not (len(self.pos_x_log) == len(self.pos_y_log) == len(self.setpoint_x_log) ==
+                len(self.setpoint_y_log) == len(self.servo_log) == n):
+            print("[SAVE] log length mismatch, not saving (something went off).")
+            return
+
+        os.makedirs("logs", exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        fname = f"logs/sp_{self.experiment_tag}_{ts}.csv"
+
+        servo_arr = np.array(self.servo_log, dtype=float)
+        data = np.column_stack([
+            np.array(self.time_log, dtype=float),
+            np.array(self.pos_x_log, dtype=float),
+            np.array(self.pos_y_log, dtype=float),
+            np.array(self.setpoint_x_log, dtype=float),
+            np.array(self.setpoint_y_log, dtype=float),
+            np.array(self.err_x_log, dtype=float) if len(self.err_x_log) == n else np.full(n, np.nan),
+            np.array(self.err_y_log, dtype=float) if len(self.err_y_log) == n else np.full(n, np.nan),
+            servo_arr[:, 0],
+            servo_arr[:, 1],
+            servo_arr[:, 2],
+        ])
+
+        header = (
+            "t_s,ball_x_px,ball_y_px,setpoint_x_px,setpoint_y_px,"
+            "err_x_m_window,err_y_m_window,servo1_deg,servo2_deg,servo3_deg"
+        )
+
+        np.savetxt(fname, data, delimiter=",", header=header, comments="")
+        print(f"[SAVE] logs written to {fname}")
+
 
     def create_gui(self):
         self.root = tk.Tk()
@@ -604,6 +655,7 @@ class StewartPIDController:
         
         ttk.Button(btn_frame, text="Reset Integrals", command=self.reset_integrals).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Plot Results", command=self.plot_results).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="Save CSV", command=self.save_csv).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Stop", command=self.stop).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_frame, text="Reset to Center", command=self.reset_setpoint_to_center).pack(side=tk.LEFT, padx=6)
 

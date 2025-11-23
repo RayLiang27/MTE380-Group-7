@@ -40,8 +40,8 @@ class BallDetector:
                         frame_width = config.get('camera', {}).get('frame_width', 640)
                         self.scale_factor = config['calibration']['pixel_to_meter_ratio'] * (frame_width / 2)
                 
-                print(f"[BALL_DETECT] Loaded HSV bounds: {self.lower_hsv} to {self.upper_hsv}")
-                print(f"[BALL_DETECT] Scale factor: {self.scale_factor:.6f} m/normalized_unit")
+                # print(f"[BALL_DETECT] Loaded HSV bounds: {self.lower_hsv} to {self.upper_hsv}")
+                # print(f"[BALL_DETECT] Scale factor: {self.scale_factor:.6f} m/normalized_unit")
                 
             except Exception as e:
                 print(f"[BALL_DETECT] Config load error: {e}, using defaults")

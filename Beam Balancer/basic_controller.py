@@ -8,6 +8,7 @@ from tkinter import ttk
 import matplotlib.pyplot as plt
 from threading import Thread
 import queue
+import math
 from ball_detection import detect_ball_x
 
 class BasicPIDController:
@@ -54,17 +55,18 @@ class BasicPIDController:
     def send_servo_angle(self, angle):
         """Send angle command to servo motor (clipped for safety)."""
         if self.servo:
-            servo_angle = self.neutral_angle + angle
-            servo_angle = int(np.clip(servo_angle, 35, 95))
+            actual_angle = self.neutral_angle + angle
+            servo_angle = f"{actual_angle:.2f}\n".encode()
+            print(f"[SERVO] Sending angle: {servo_angle}")
             try:
-                self.servo.write(bytes([servo_angle]))
+                self.servo.write(servo_angle)
             except Exception:
                 print("[SERVO] Send failed")
 
-    def update_pid(self, position, dt=0.033):
+    def update_pid(self, position, dt=1e-3):
         """Perform PID calculation and return control output."""
         error = self.setpoint - position  # Compute error
-        error = error * 100  # Scale error for easier tuning (if needed)
+        error = error * 10 # Scale error for easier tuning (if needed)
         # Proportional term
         P = self.Kp * error
         # Integral term accumulation
@@ -76,7 +78,7 @@ class BasicPIDController:
         self.prev_error = error
         # PID output (limit to safe beam range)
         output = P + I + D
-        output = np.clip(output/2, -15, 15)
+        output = np.clip(output, -20, 20)
         print(error)
         return output
 

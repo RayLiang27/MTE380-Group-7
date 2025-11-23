@@ -3,9 +3,9 @@
 // Servo configuration
 Servo beamServo;
 const int servoPin = 9;
-const int MIN_ANGLE = 35;
-const int MAX_ANGLE = 95;
-const int NEUTRAL_ANGLE = 65;
+const int MIN_ANGLE = 30;
+const int MAX_ANGLE = 90;
+const int NEUTRAL_ANGLE = 60;
 
 // Communication variables
 int targetAngle = NEUTRAL_ANGLE;
@@ -32,8 +32,9 @@ void loop() {
   // Check for incoming serial data
   if (Serial.available() > 0) {
     // Read the incoming byte
-    int receivedAngle = Serial.read();
-    
+    String input = Serial.readStringUntil('\n');
+    float receivedAngle = input.toFloat();
+    // Serial.println(receivedAngle);
     // Validate angle range
     if (receivedAngle >= MIN_ANGLE && receivedAngle <= MAX_ANGLE) {
       targetAngle = receivedAngle;
@@ -43,6 +44,7 @@ void loop() {
   
   // Update servo if new command received
   if (newCommand) {
+    // int pulse = map(targetAngle, MIN_ANGLE, MAX_ANGLE, 1000, 2000);
     beamServo.write(targetAngle);
     newCommand = false;
     
@@ -52,5 +54,5 @@ void loop() {
   }
   
   // Small delay for stability
-  delay(10);
+  delay(5);
 }

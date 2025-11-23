@@ -67,8 +67,8 @@ class SimpleAutoCalibrator:
         """
         if self.servo:
             # Clip angle to safe range and send as byte
-            angle = int(np.clip(angle, 35, 95))
-            self.servo.write(bytes([angle]))
+            angle = f"{angle:.2f}\n".encode()
+            self.servo.write(angle)
 
     def mouse_callback(self, event, x, y, flags, param):
         """Handle mouse click events for interactive calibration.
