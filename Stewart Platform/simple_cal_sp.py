@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 
 # Default neutral servo angles (degrees)
-NEUTRAL_ANGLES = [27, 40, 40]
+NEUTRAL_ANGLES = [50, 50, 50]
 
 class SimpleCalibratorSP:
     def __init__(self):

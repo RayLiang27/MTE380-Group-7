@@ -10,6 +10,7 @@ from threading import Thread
 import queue
 import os
 from collections import deque
+import random
 
 try:
     cv2.setNumThreads(1)
@@ -66,11 +67,11 @@ class StewartPIDController:
         servos = self.config.get('servo_calibration', {}).get('neutral_angles_deg')
         if servos and len(servos) >= 3:
             self.neutral_angles = [int(s) for s in servos[:3]]
-            self.neutral_angles = [39,50,50]
+            self.neutral_angles = [40, 53, 50]
         else:
             # sensible reasonable default
-            self.neutral_angles = [50, 50, 50]
-            self.neutral_angles = [39,50,50]
+            # self.neutral_angles = [50, 50, 50]
+            self.neutral_angles = [40, 53, 50]
 
         # self.arduino_port = self.config.get('arduino_port', "/dev/cu.usbmodem1301")
         self.arduino_port = self.config.get('arduino_port', "COM5")
@@ -459,7 +460,8 @@ class StewartPIDController:
 
                 # print(f"qsize: {self.position_queue.qsize()}")
                 print(f"t={t:.2f}s center={center.astype(int)} err_px={error_px.astype(int)} PID_out=[{out_x} {out_y}] servo={list(map(int,angles))}")
-
+                sleepy_time = random.uniform(0,10) / 1000.0
+                time.sleep(sleepy_time)  
             except queue.Empty:
                 continue
             # except Exception as e:
